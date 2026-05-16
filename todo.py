@@ -9,7 +9,8 @@ from PIL import Image
 from googleapiclient.discovery import build
 from google.oauth2 import service_account
 
-# --- CONFIGURATION (Secrets) ---
+# --- CONFIGURATION SECRETS ---
+# Assurez-vous que ces noms correspondent EXACTEMENT à vos Secrets Streamlit
 NTFY_TOPIC = st.secrets.get("ntfy_topic", "youndesign_pkm_secret")
 CALENDAR_ID = st.secrets.get("calendar_id", "")
 
@@ -22,18 +23,25 @@ def send_notif(title, message, priority="default"):
     except: pass
 
 def get_calendar_service():
+    """Initialise la connexion avec l'API Google Calendar."""
     creds_info = st.secrets["connections"]["gsheets"]
     creds = service_account.Credentials.from_service_account_info(creds_info)
     scoped_creds = creds.with_scopes(['https://www.googleapis.com/auth/calendar'])
     return build('calendar', 'v3', credentials=scoped_creds)
 
 def upsert_calendar_event(row_data):
+    """Crée ou met à jour l'événement dans Google Calendar."""
+    # Sécurité : Pas de date ou pas de calendrier = pas d'événement
     if not row_data['echeance'] or row_data['type'] != "Task" or not CALENDAR_ID:
         return ""
+    
     try:
         service = get_calendar_service()
+        
+        # Préparation du format de date pour Google
         start_dt = pd.to_datetime(row_data['echeance'])
         end_dt = start_dt + timedelta(minutes=30)
+        
         event_body = {
             'summary': row_data['titre'],
             'location': row_data['gros_titre'],
@@ -41,12 +49,21 @@ def upsert_calendar_event(row_data):
             'start': {'dateTime': start_dt.isoformat(), 'timeZone': 'Europe/Paris'},
             'end': {'dateTime': end_dt.isoformat(), 'timeZone': 'Europe/Paris'},
         }
-        if row_data.get('cal_event_id') and str(row_data['cal_event_id']) != "":
-            event = service.events().update(calendarId=CALENDAR_ID, eventId=row_data['cal_event_id'], body=event_body).execute()
+
+        # Si on a déjà un ID d'événement, on le met à jour (Update)
+        cal_evt_id = str(row_data.get('cal_event_id', ""))
+        if cal_evt_id and cal_evt_id != "" and cal_evt_id != "nan":
+            event = service.events().update(calendarId=CALENDAR_ID, eventId=cal_evt_id, body=event_body).execute()
+            st.toast("🔄 Agenda mis à jour")
         else:
+            # Sinon, on crée un nouvel événement (Insert)
             event = service.events().insert(calendarId=CALENDAR_ID, body=event_body).execute()
+            st.toast("📅 Ajouté à l'agenda")
+        
         return event.get('id')
-    except: return ""
+    except Exception as e:
+        st.error(f"⚠️ Erreur de synchronisation Agenda : {e}")
+        return ""
 
 # --- CONNEXION & DATA ---
 conn = st.connection("gsheets", type=GSheetsConnection)
@@ -55,7 +72,6 @@ def load_data():
     try:
         df = conn.read(ttl=0)
         df = df.dropna(subset=['gros_titre', 'titre'], how='all')
-        # On force TOUT en texte pour éviter les erreurs de tri et de type
         cols = ['id', 'status', 'date_archive', 'image_b64', 'notif_sent', 'gros_titre', 'titre', 'echeance', 'contenu', 'type', 'cal_event_id']
         for col in cols:
             if col not in df.columns: df[col] = ""
@@ -73,12 +89,12 @@ def save_data(df_to_save):
     conn.update(data=final_df)
     st.cache_data.clear()
 
-# --- MOTEUR DE NOTIFICATIONS ---
+# --- MOTEUR NOTIFS ---
 df = load_data()
 now = datetime.now()
 mask_now = (df['status'] == 'En cours') & (df['dt_obj'] <= now) & (df['notif_sent'] != 'OUI')
 if mask_now.any():
-    for idx, row in df[mask_now].iterrows():
+    for idx, row in df[mask_notif].iterrows():
         send_notif(f"⏰ MAINTENANT : {row['titre']}", row['contenu'], priority="high")
         df.at[idx, 'notif_sent'] = 'OUI'
     save_data(df)
@@ -104,6 +120,7 @@ if check_password():
 
     if 'edit_item_idx' not in st.session_state: st.session_state['edit_item_idx'] = None
 
+    # --- COMPOSANT CARTE ---
     def item_card(idx, row, is_overdue=False, key_suffix=""):
         color = "#FF4B4B" if is_overdue else "#31333F"
         with st.container(border=True):
@@ -121,7 +138,7 @@ if check_password():
             with c2:
                 st.markdown(f"**{row['gros_titre']}** > {row['titre']}")
                 st.write(row['contenu'])
-                if row['image_b64'] and len(row['image_b64']) > 10:
+                if row['image_b64'] and len(row['image_b64']) > 20:
                     try: st.image(base64.b64decode(row['image_b64']), width=250)
                     except: pass
             with c3:
@@ -132,6 +149,7 @@ if check_password():
                 if st.button("✏️", key=f"ed_{idx}_{key_suffix}"):
                     st.session_state['edit_item_idx'] = idx; st.rerun()
 
+    # --- ONGLETS ---
     tabs = st.tabs(["☀️ Jour", "📅 Semaine", "📊 Mois", "📂 Thèmes", "📝 Notes", "🗄️ Archive", "🖊️ Saisie"])
     active = df[df['status'] == 'En cours']
 
@@ -145,10 +163,6 @@ if check_password():
     with tabs[1]:
         due_wk = active[(active['dt_obj'].dt.date > today) & (active['dt_obj'].dt.date <= today + timedelta(days=7))]
         for idx, r in due_wk.iterrows(): item_card(idx, r, key_suffix="wk")
-
-    with tabs[2]:
-        due_mo = active[(active['dt_obj'].dt.date > today) & (active['dt_obj'].dt.date <= today + timedelta(days=30))]
-        for idx, r in due_mo.iterrows(): item_card(idx, r, key_suffix="mo")
 
     with tabs[3]:
         for gt in sorted(active['gros_titre'].unique()):
@@ -168,10 +182,9 @@ if check_password():
         
         st.header("🖊️ Saisie" if idx_e is None else "✏️ Modif")
         
-        with st.form("form_v13", clear_on_submit=True):
+        with st.form("form_v14", clear_on_submit=True):
             col1, col2 = st.columns(2)
             with col1:
-                # Tri sécurisé : on convertit en string et on enlève les doublons vides
                 l_gt = sorted(list(set([str(x) for x in df['gros_titre'] if str(x) != ''])))
                 idx_gt = l_gt.index(edit_r['gros_titre'])+1 if (edit_r is not None and edit_r['gros_titre'] in l_gt) else 0
                 f_gt = st.selectbox("Dossier", [""] + l_gt, index=idx_gt)
@@ -188,9 +201,7 @@ if check_password():
                 f_h = st.time_input("Heure", value=edit_r['dt_obj'].time() if (edit_r is not None and not pd.isna(edit_r['dt_obj'])) else time(8,0))
                 f_img = st.file_uploader("Photo", type=['jpg', 'png', 'jpeg'])
 
-            # LE BOUTON DOIT ÊTRE ICI (DANS LE BLOC WITH)
-            btn_label = "💾 ENREGISTRER"
-            if st.form_submit_button(btn_label):
+            if st.form_submit_button("💾 ENREGISTRER TOUT"):
                 final_gt = f_gt_n if f_gt_n else f_gt
                 final_t = f_t_n if f_t_n else f_t
                 date_s = datetime.combine(f_d, f_h).strftime('%Y-%m-%d %H:%M:%S') if f_d else ""
@@ -201,20 +212,39 @@ if check_password():
                     buf = io.BytesIO(); img.save(buf, format="JPEG", quality=70)
                     b64 = base64.b64encode(buf.getvalue()).decode()
                 
-                # Update/Insert logic
+                # 1. PRÉPARATION LOGIQUE AGENDA
+                temp_row = {
+                    'titre': final_t, 
+                    'gros_titre': final_gt, 
+                    'contenu': f_c, 
+                    'echeance': date_s, 
+                    'type': "Task" if f_d else "Note", 
+                    'cal_event_id': edit_r['cal_event_id'] if edit_r is not None else ""
+                }
+                
+                # 2. APPEL GOOGLE CALENDAR
+                new_cal_id = upsert_calendar_event(temp_row)
+
+                # 3. ENREGISTREMENT DANS LE DATAFRAME
                 if idx_e is not None:
                     df.at[idx_e, 'gros_titre'], df.at[idx_e, 'titre'], df.at[idx_e, 'contenu'] = final_gt, final_t, f_c
                     df.at[idx_e, 'echeance'], df.at[idx_e, 'type'], df.at[idx_e, 'image_b64'] = date_s, ("Task" if f_d else "Note"), b64
+                    df.at[idx_e, 'cal_event_id'] = new_cal_id if new_cal_id else df.at[idx_e, 'cal_event_id']
                     df.at[idx_e, 'notif_sent'] = ""
                 else:
                     ids = pd.to_numeric(df['id'], errors='coerce').dropna()
                     new_id = int(ids.max() + 1) if not ids.empty else 1
-                    new_r = {"id": new_id, "gros_titre": final_gt, "titre": final_t, "contenu": f_c, "echeance": date_s, "type": ("Task" if f_d else "Note"), "status": "En cours", "date_archive": "", "image_b64": b64, "notif_sent": "", "cal_event_id": ""}
+                    new_r = {
+                        "id": new_id, "gros_titre": final_gt, "titre": final_t, "contenu": f_c, 
+                        "echeance": date_s, "type": ("Task" if f_d else "Note"), "status": "En cours", 
+                        "date_archive": "", "image_b64": b64, "notif_sent": "", "cal_event_id": new_cal_id
+                    }
                     df = pd.concat([df, pd.DataFrame([new_r])], ignore_index=True)
                 
+                # 4. SAUVEGARDE FINALE GOOGLE SHEETS
                 save_data(df)
                 st.session_state['edit_item_idx'] = None
-                st.success("Enregistré !")
+                send_notif("Enregistré", f"{final_t} est à jour.")
                 st.rerun()
 
     with st.sidebar:
