@@ -32,7 +32,7 @@ def delete_calendar_event(cal_id):
     try:
         service = get_calendar_service()
         service.events().delete(calendarId=CALENDAR_ID, eventId=str(cal_id)).execute()
-        st.toast("🗑️ Supprimé de Google")
+        st.toast("🗑️ Agenda nettoyé")
     except: pass
 
 def upsert_calendar_event(row_data):
@@ -68,7 +68,6 @@ def get_category_style(gt):
     elif "maison" in gt_lower or "home" in gt_lower: emoji = "🏠"
     elif "perso" in gt_lower: emoji = "👤"
     elif "sport" in gt_lower: emoji = "🏃"
-    elif "course" in gt_lower: emoji = "🛒"
     elif "idée" in gt_lower: emoji = "💡"
     colors = ["#3498db", "#2ecc71", "#9b59b6", "#f1c40f", "#e67e22", "#e74c3c", "#1abc9c", "#34495e"]
     color_idx = sum(ord(c) for c in str(gt)) % len(colors)
@@ -84,7 +83,10 @@ def load_data():
         for col in cols:
             if col not in df_loaded.columns: df_loaded[col] = ""
             df_loaded[col] = df_loaded[col].astype(str).replace('nan', '').fillna('')
+        # Nettoyage strict du statut
+        df_loaded['status'] = df_loaded['status'].str.strip()
         df_loaded.loc[df_loaded['status'] == "", 'status'] = 'En cours'
+        # Conversion Date Robuste
         df_loaded['dt_obj'] = pd.to_datetime(df_loaded['echeance'], errors='coerce')
         return df_loaded
     except:
@@ -110,14 +112,14 @@ if "password_correct" not in st.session_state:
 # --- INITIALISATION ---
 st.set_page_config(page_title="YounDesign PKM", layout="wide")
 df = load_data()
-now_ts = pd.Timestamp(datetime.now())
-today = now_ts.date()
+now = datetime.now()
+today = now.date()
 
 if 'edit_item_idx' not in st.session_state: st.session_state['edit_item_idx'] = None
 
 # --- LOGIQUE REPORT RAPIDE ---
 def quick_reschedule(idx, days=0, weeks=0, months=0, years=0):
-    new_date = datetime.now() + timedelta(days=days, weeks=weeks + (months*4.34))
+    new_date = datetime.now() + timedelta(days=days, weeks=weeks + (months*4))
     if years > 0:
         try: new_date = new_date.replace(year=new_date.year + years)
         except: new_date = new_date + timedelta(days=365)
@@ -134,13 +136,13 @@ def item_card(idx, row, is_overdue=False, key_suffix=""):
     overdue_style = "border: 3px solid #FF4B4B; background-color: #fff1f1;" if is_overdue else f"border-left: 8px solid {cat_color};"
     
     st.markdown(f"""<div style='{overdue_style} padding:15px; border-radius:10px; margin-bottom:10px; background-color:white; box-shadow: 2px 2px 5px rgba(0,0,0,0.05);'>
-        <div style='display:flex; justify-content:space-between;'><span style='color:{cat_color}; font-weight:bold;'>{cat_emoji} {row['gros_titre']}</span><span style='font-size:0.8em; color:gray;'>ID: {row['id']}</span></div>
+        <div style='display:flex; justify-content:space-between;'><span style='color:{cat_color}; font-weight:bold;'>{cat_emoji} {row['gros_titre']}</span></div>
         <div style='font-size:1.2em; font-weight:bold; margin-top:5px;'>{'📌' if row['google_type'] == 'Tâche (Journée)' else '⏰'} {row['titre']}</div>
         <div style='color:#555; margin-top:5px;'>{row['contenu']}</div></div>""", unsafe_allow_html=True)
     
     c1, c2, c3 = st.columns([0.2, 0.6, 0.2])
     with c1:
-        if row['status'] != 'Terminé':
+        if row['status'] == 'En cours':
             if st.checkbox("Fait", key=f"c_{idx}_{key_suffix}"):
                 delete_calendar_event(row['cal_event_id'])
                 df.at[idx, 'status'], df.at[idx, 'date_archive'] = 'Terminé', datetime.now().strftime('%Y-%m-%d')
@@ -148,17 +150,18 @@ def item_card(idx, row, is_overdue=False, key_suffix=""):
         else:
             if st.button("🔄 Restaurer", key=f"r_{idx}_{key_suffix}"):
                 new_cal = upsert_calendar_event(row.to_dict())
-                df.at[idx, 'status'], df.at[idx, 'date_archive'], df.at[idx, 'cal_event_id'] = 'En cours', "", new_cal
+                df.at[idx, 'status'], df.at[idx, 'date_archive'] = 'En cours', ""
+                df.at[idx, 'cal_event_id'] = new_cal
                 save_data(df); st.rerun()
     with c2:
-        if row['type'] == 'Task' and not pd.isna(row['dt_obj']):
+        if not pd.isna(row['dt_obj']):
             st.caption(f"📅 {row['dt_obj'].strftime('%d/%m/%Y %H:%M')}")
-            if row['status'] != 'Terminé':
+            if row['status'] == 'En cours':
                 cr1, cr2 = st.columns(2)
                 if cr1.button("⏩ Demain 08h", key=f"q_{idx}_{key_suffix}"): quick_reschedule(idx, days=1)
                 with cr2.expander("Autres..."):
                     if st.button("+7j", key=f"p7_{idx}_{key_suffix}"): quick_reschedule(idx, weeks=1)
-                    if st.button("+1m", key=f"p30_{idx}_{key_suffix}"): quick_reschedule(idx, days=30)
+                    if st.button("+30j", key=f"p30_{idx}_{key_suffix}"): quick_reschedule(idx, days=30)
                     if st.button("+1an", key=f"p1y_{idx}_{key_suffix}"): quick_reschedule(idx, years=1)
         img_raw = row.get('image_b64', "")
         if isinstance(img_raw, str) and len(img_raw) > 50:
@@ -174,7 +177,7 @@ def show_saisie_form(idx_e=None):
     global df
     edit_r = df.loc[idx_e] if idx_e is not None else None
     st.subheader("🖊️ Saisie" if idx_e is None else "✏️ Modification")
-    with st.form(f"f_{idx_e if idx_e else 'new'}"):
+    with st.form(f"f_{idx_e if idx_e is not None else 'new'}"):
         c1, c2 = st.columns(2)
         with c1:
             l_gt = sorted(list(set([str(x) for x in df['gros_titre'] if x])))
@@ -215,14 +218,14 @@ def show_saisie_form(idx_e=None):
                 df = pd.concat([df, pd.DataFrame([nr])], ignore_index=True)
             save_data(df); st.session_state['edit_item_idx'] = None; st.rerun()
 
-# --- SIDEBAR ---
+# --- SIDEBAR & RECHERCHE ---
 with st.sidebar:
     st.header("🔍 Recherche")
     search = st.text_input("Filtrer...", "").lower()
-    if st.button("🔔 Test Notif"): send_notif("Test", "Signal Pimpon !")
+    st.divider()
     if st.button("🚪 Déconnexion"): del st.session_state["password_correct"]; st.rerun()
 
-# --- LOGIQUE FILTRAGE ---
+# --- FILTRAGE ---
 df_f = df.copy()
 if search:
     df_f = df[df['titre'].str.lower().str.contains(search) | df['contenu'].str.lower().str.contains(search) | df['gros_titre'].str.lower().str.contains(search)]
@@ -238,17 +241,18 @@ active = df_f[df_f['status'] == 'En cours'].copy()
 if not active.empty: active = active.sort_values('dt_obj', ascending=True)
 
 with tabs[0]: # JOUR
-    ov = active[(active['type'] == 'Task') & (active['dt_obj'] < now_ts)]
+    ov = active[(active['type'] == 'Task') & (active['dt_obj'] < now)]
     for idx, r in ov.iterrows(): item_card(idx, r, is_overdue=True, key_suffix="ov")
-    tod = active[(active['type'] == 'Task') & (active['dt_obj'].dt.date == today)]
+    tod = active[(active['type'] == 'Task') & (active['dt_obj'].dt.date == today) & (active['dt_obj'] >= now)]
     for idx, r in tod.iterrows(): item_card(idx, r, key_suffix="tod")
+    if ov.empty and tod.empty: st.info("Rien pour aujourd'hui.")
 
 with tabs[1]: # SEMAINE
     wk = active[(active['type'] == 'Task') & (active['dt_obj'].dt.date > today) & (active['dt_obj'].dt.date <= today + timedelta(days=7))]
     for idx, r in wk.iterrows(): item_card(idx, r, key_suffix="wk")
 
 with tabs[2]: # MOIS
-    mo = active[(active['type'] == 'Task') & (active['dt_obj'].dt.date > today + timedelta(days=7)) & (active['dt_obj'].dt.date <= today + timedelta(days=30))]
+    mo = active[(active['type'] == 'Task') & (active['dt_obj'].dt.date > today) & (active['dt_obj'].dt.date <= today + timedelta(days=30))]
     for idx, r in mo.iterrows(): item_card(idx, r, key_suffix="mo")
 
 with tabs[3]: # THEMES
@@ -264,7 +268,7 @@ with tabs[4]: # NOTES
 
 with tabs[5]: # ARCHIVE
     arc = df_f[df_f['status'] == 'Terminé']
-    for idx, r in arc.sort_values('date_archive', ascending=False).iterrows(): item_card(idx, r, key_suffix="arc")
+    for idx, r in arc.sort_values('id', ascending=False).iterrows(): item_card(idx, r, key_suffix="arc")
 
 with tabs[6]: # SAISIE
     if st.session_state['edit_item_idx'] is None: show_saisie_form()
