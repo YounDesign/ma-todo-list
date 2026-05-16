@@ -9,7 +9,7 @@ from PIL import Image
 from googleapiclient.discovery import build
 from google.oauth2 import service_account
 
-# --- CONFIGURATION (Via Secrets) ---
+# --- CONFIGURATION (Secrets) ---
 NTFY_TOPIC = st.secrets.get("ntfy_topic", "youndesign_pkm_secret")
 CALENDAR_ID = st.secrets.get("calendar_id", "")
 
@@ -41,7 +41,7 @@ def upsert_calendar_event(row_data):
             'start': {'dateTime': start_dt.isoformat(), 'timeZone': 'Europe/Paris'},
             'end': {'dateTime': end_dt.isoformat(), 'timeZone': 'Europe/Paris'},
         }
-        if row_data.get('cal_event_id'):
+        if row_data.get('cal_event_id') and str(row_data['cal_event_id']) != "":
             event = service.events().update(calendarId=CALENDAR_ID, eventId=row_data['cal_event_id'], body=event_body).execute()
         else:
             event = service.events().insert(calendarId=CALENDAR_ID, body=event_body).execute()
@@ -55,10 +55,12 @@ def load_data():
     try:
         df = conn.read(ttl=0)
         df = df.dropna(subset=['gros_titre', 'titre'], how='all')
+        # On force TOUT en texte pour éviter les erreurs de tri et de type
         cols = ['id', 'status', 'date_archive', 'image_b64', 'notif_sent', 'gros_titre', 'titre', 'echeance', 'contenu', 'type', 'cal_event_id']
         for col in cols:
             if col not in df.columns: df[col] = ""
-            df[col] = df[col].astype(str).replace('nan', '')
+            df[col] = df[col].astype(str).replace('nan', '').fillna('')
+        
         df.loc[df['status'] == "", 'status'] = 'En cours'
         df['dt_obj'] = pd.to_datetime(df['echeance'], errors='coerce')
         df['date_archive_dt'] = pd.to_datetime(df['date_archive'], errors='coerce')
@@ -71,18 +73,9 @@ def save_data(df_to_save):
     conn.update(data=final_df)
     st.cache_data.clear()
 
-def cleanup_old_archives(df):
-    limit_date = pd.Timestamp(datetime.now().date() - timedelta(days=30))
-    initial_len = len(df)
-    mask = (df['status'] != 'Terminé') | (df['date_archive_dt'] >= limit_date) | (df['date_archive_dt'].isna())
-    df = df[mask]
-    if len(df) < initial_len: save_data(df)
-    return df
-
-# --- MOTEUR DE NOTIFICATIONS (Avant mot de passe pour Cron-Job) ---
+# --- MOTEUR DE NOTIFICATIONS ---
 df = load_data()
 now = datetime.now()
-# 1. Heure pile
 mask_now = (df['status'] == 'En cours') & (df['dt_obj'] <= now) & (df['notif_sent'] != 'OUI')
 if mask_now.any():
     for idx, row in df[mask_now].iterrows():
@@ -106,7 +99,6 @@ def check_password():
 if check_password():
     st.set_page_config(page_title="YounDesign PKM", layout="wide")
     df = load_data()
-    df = cleanup_old_archives(df)
     now_ts = pd.Timestamp(now)
     today = now_ts.date()
 
@@ -129,17 +121,12 @@ if check_password():
             with c2:
                 st.markdown(f"**{row['gros_titre']}** > {row['titre']}")
                 st.write(row['contenu'])
-                if row['image_b64']:
+                if row['image_b64'] and len(row['image_b64']) > 10:
                     try: st.image(base64.b64decode(row['image_b64']), width=250)
                     except: pass
             with c3:
                 if row['type'] == 'Task' and not pd.isna(row['dt_obj']):
                     st.markdown(f"<span style='color:{color}'>📅 {row['dt_obj'].strftime('%d/%m/%Y %H:%M')}</span>", unsafe_allow_html=True)
-                    if is_overdue and row['status'] != 'Terminé':
-                        new_d = st.date_input("Reporter :", value=today, key=f"rd_{idx}_{key_suffix}")
-                        if st.button("OK", key=f"rb_{idx}_{key_suffix}"):
-                            df.at[idx, 'echeance'] = datetime.combine(new_d, time(8,0)).strftime('%Y-%m-%d %H:%M:%S')
-                            df.at[idx, 'notif_sent'] = ""; save_data(df); st.rerun()
                 else: st.caption("📝 Note")
             with c4:
                 if st.button("✏️", key=f"ed_{idx}_{key_suffix}"):
@@ -178,49 +165,57 @@ if check_password():
     with tabs[6]:
         idx_e = st.session_state['edit_item_idx']
         edit_r = df.loc[idx_e] if idx_e is not None else None
+        
         st.header("🖊️ Saisie" if idx_e is None else "✏️ Modif")
-        with st.form("f_final", clear_on_submit=True):
+        
+        with st.form("form_v13", clear_on_submit=True):
             col1, col2 = st.columns(2)
             with col1:
-                l_gt = sorted(df['gros_titre'].unique().tolist()) if not df.empty else []
+                # Tri sécurisé : on convertit en string et on enlève les doublons vides
+                l_gt = sorted(list(set([str(x) for x in df['gros_titre'] if str(x) != ''])))
                 idx_gt = l_gt.index(edit_r['gros_titre'])+1 if (edit_r is not None and edit_r['gros_titre'] in l_gt) else 0
                 f_gt = st.selectbox("Dossier", [""] + l_gt, index=idx_gt)
                 f_gt_n = st.text_input("OU Nouveau Dossier")
-                l_t = sorted(df['titre'].unique().tolist()) if not df.empty else []
+                
+                l_t = sorted(list(set([str(x) for x in df['titre'] if str(x) != ''])))
                 idx_t = l_t.index(edit_r['titre'])+1 if (edit_r is not None and edit_r['titre'] in l_t) else 0
                 f_t = st.selectbox("Titre", [""] + l_t, index=idx_t)
                 f_t_n = st.text_input("OU Nouveau Titre")
+                
             with col2:
                 f_c = st.text_area("Contenu", value=edit_r['contenu'] if edit_r is not None else "")
                 f_d = st.date_input("Date (Optionnel)", value=edit_r['dt_obj'].date() if (edit_r is not None and not pd.isna(edit_r['dt_obj'])) else None)
                 f_h = st.time_input("Heure", value=edit_r['dt_obj'].time() if (edit_r is not None and not pd.isna(edit_r['dt_obj'])) else time(8,0))
                 f_img = st.file_uploader("Photo", type=['jpg', 'png', 'jpeg'])
 
-            if st.form_submit_button("💾 ENREGISTRER TOUT"):
+            # LE BOUTON DOIT ÊTRE ICI (DANS LE BLOC WITH)
+            btn_label = "💾 ENREGISTRER"
+            if st.form_submit_button(btn_label):
                 final_gt = f_gt_n if f_gt_n else f_gt
                 final_t = f_t_n if f_t_n else f_t
                 date_s = datetime.combine(f_d, f_h).strftime('%Y-%m-%d %H:%M:%S') if f_d else ""
-                b64 = edit_r['image_b64'] if edit_r is not None else ""
+                
+                b64 = edit_r['image_b64'] if (edit_r is not None and 'image_b64' in edit_r) else ""
                 if f_img:
                     img = Image.open(f_img); img.thumbnail((400, 400))
                     buf = io.BytesIO(); img.save(buf, format="JPEG", quality=70)
                     b64 = base64.b64encode(buf.getvalue()).decode()
                 
-                # Agenda
-                temp_row = {'titre': final_t, 'gros_titre': final_gt, 'contenu': f_c, 'echeance': date_s, 'type': "Task" if f_d else "Note", 'cal_event_id': edit_r['cal_event_id'] if edit_r is not None else ""}
-                new_cal_id = upsert_calendar_event(temp_row)
-
+                # Update/Insert logic
                 if idx_e is not None:
                     df.at[idx_e, 'gros_titre'], df.at[idx_e, 'titre'], df.at[idx_e, 'contenu'] = final_gt, final_t, f_c
                     df.at[idx_e, 'echeance'], df.at[idx_e, 'type'], df.at[idx_e, 'image_b64'] = date_s, ("Task" if f_d else "Note"), b64
-                    df.at[idx_e, 'cal_event_id'] = new_cal_id if new_cal_id else df.at[idx_e, 'cal_event_id']
                     df.at[idx_e, 'notif_sent'] = ""
                 else:
                     ids = pd.to_numeric(df['id'], errors='coerce').dropna()
                     new_id = int(ids.max() + 1) if not ids.empty else 1
-                    new_r = {"id": new_id, "gros_titre": final_gt, "titre": final_t, "contenu": f_c, "echeance": date_s, "type": ("Task" if f_d else "Note"), "status": "En cours", "date_archive": "", "image_b64": b64, "notif_sent": "", "cal_event_id": new_cal_id}
+                    new_r = {"id": new_id, "gros_titre": final_gt, "titre": final_t, "contenu": f_c, "echeance": date_s, "type": ("Task" if f_d else "Note"), "status": "En cours", "date_archive": "", "image_b64": b64, "notif_sent": "", "cal_event_id": ""}
                     df = pd.concat([df, pd.DataFrame([new_r])], ignore_index=True)
-                save_data(df); st.session_state['edit_item_idx'] = None; st.rerun()
+                
+                save_data(df)
+                st.session_state['edit_item_idx'] = None
+                st.success("Enregistré !")
+                st.rerun()
 
     with st.sidebar:
         if st.button("🔔 Test Notif"): send_notif("Test", "Ça fonctionne !")
