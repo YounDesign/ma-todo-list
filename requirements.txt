@@ -4,3 +4,4 @@ st-gsheets-connection
 requests
 google-api-python-client
 google-auth
+Pillow
