@@ -34,18 +34,14 @@ if check_password():
             df = conn.read(ttl=0)
             df = df.dropna(subset=['gros_titre', 'titre'], how='all')
             
-            # --- FIX: FORCER LES TYPES POUR ÉVITER LES CRASHS ---
+            # Normalisation des types pour éviter les crashs
             for col in ['status', 'date_archive', 'gros_titre', 'titre', 'contenu', 'echeance', 'type']:
                 if col not in df.columns: df[col] = ""
                 df[col] = df[col].astype(str).replace('nan', '')
             
-            # Normalisation du statut
             df.loc[df['status'] == '', 'status'] = 'En cours'
-            
-            # Conversion des dates pour les calculs internes
             df['dt_obj'] = pd.to_datetime(df['echeance'], errors='coerce')
             df['date_archive_dt'] = pd.to_datetime(df['date_archive'], errors='coerce')
-            
         except Exception as e:
             st.error(f"Erreur chargement : {e}")
             df = pd.DataFrame(columns=["id", "gros_titre", "titre", "contenu", "echeance", "type", "status", "date_archive"])
@@ -60,7 +56,6 @@ if check_password():
     def cleanup_old_archives(df):
         limit_date = pd.Timestamp(datetime.now().date() - timedelta(days=30))
         initial_len = len(df)
-        # On garde les tâches actives OU les archives de moins de 30 jours
         mask = (df['status'] != 'Terminé') | (df['date_archive_dt'] >= limit_date) | (df['date_archive_dt'].isna())
         df = df[mask]
         if len(df) < initial_len:
@@ -87,7 +82,13 @@ if check_password():
                         df.at[idx, 'date_archive'] = datetime.now().strftime('%Y-%m-%d')
                         save_data(df)
                         st.rerun()
-                else: st.write("📁")
+                else:
+                    # BOUTON RESTAURER (Ressortir de l'archive)
+                    if st.button("🔄", key=f"res_{idx}_{key_suffix}", help="Restaurer la tâche"):
+                        df.at[idx, 'status'] = 'En cours'
+                        df.at[idx, 'date_archive'] = ""
+                        save_data(df)
+                        st.rerun()
             with col2:
                 st.markdown(f"**{row['gros_titre']}** > {row['titre']}")
                 st.write(row['contenu'])
@@ -95,8 +96,8 @@ if check_password():
                 if row['type'] == 'Task' and not pd.isna(row['dt_obj']):
                     st.markdown(f"<span style='color:{color}'>📅 {row['dt_obj'].strftime('%d/%m/%Y %H:%M')}</span>", unsafe_allow_html=True)
                     if is_overdue and row['status'] != 'Terminé':
-                        new_d = st.date_input("Reporter :", value=datetime.now().date(), key=f"res_{idx}_{key_suffix}")
-                        if st.button("OK", key=f"btn_res_{idx}_{key_suffix}"):
+                        new_d = st.date_input("Reporter :", value=datetime.now().date(), key=f"re_d_{idx}_{key_suffix}")
+                        if st.button("OK", key=f"re_b_{idx}_{key_suffix}"):
                             df.at[idx, 'echeance'] = datetime.combine(new_d, time(8, 0)).strftime('%Y-%m-%d %H:%M:%S')
                             save_data(df)
                             st.rerun()
@@ -115,12 +116,10 @@ if check_password():
     ])
 
     with t_day:
-        st.subheader("Planning du jour")
         overdue = active_tasks[(active_tasks['type'] == 'Task') & (active_tasks['dt_obj'] < now)]
         if not overdue.empty:
             st.error("🚨 Retards")
             for idx, r in overdue.iterrows(): item_card(idx, r, is_overdue=True, key_suffix="ov")
-        
         due_today = active_tasks[(active_tasks['type'] == 'Task') & (active_tasks['dt_obj'].dt.date == today) & (active_tasks['dt_obj'] >= now)]
         if not due_today.empty:
             st.subheader("📅 Aujourd'hui")
@@ -128,13 +127,11 @@ if check_password():
         if overdue.empty and due_today.empty: st.info("Rien d'urgent aujourd'hui.")
 
     with t_week:
-        st.subheader("7 prochains jours")
         week_limit = today + timedelta(days=7)
         due_week = active_tasks[(active_tasks['type'] == 'Task') & (active_tasks['dt_obj'].dt.date > today) & (active_tasks['dt_obj'].dt.date <= week_limit)]
         for idx, r in due_week.iterrows(): item_card(idx, r, key_suffix="wk")
 
     with t_month:
-        st.subheader("Vision 30 jours")
         month_limit = today + timedelta(days=30)
         due_month = active_tasks[(active_tasks['type'] == 'Task') & (active_tasks['dt_obj'].dt.date > today) & (active_tasks['dt_obj'].dt.date <= month_limit)]
         for idx, r in due_month.iterrows(): item_card(idx, r, key_suffix="mo")
@@ -146,35 +143,41 @@ if check_password():
                     for idx, r in active_tasks[active_tasks['gros_titre'] == gt].iterrows(): item_card(idx, r, key_suffix="th")
 
     with t_notes:
-        notes = active_tasks[active_tasks['type'] == 'Note']
-        for idx, r in notes.iterrows(): item_card(idx, r, key_suffix="nt")
+        for idx, r in active_tasks[active_tasks['type'] == 'Note'].iterrows(): item_card(idx, r, key_suffix="nt")
 
     with t_archive:
-        st.header("Archives (30j)")
+        st.header("Archives (Restaurables via 🔄)")
         archives = df[df['status'] == 'Terminé']
         if not archives.empty:
             for idx, r in archives.sort_values('date_archive', ascending=False).iterrows(): item_card(idx, r, key_suffix="arc")
 
     with t_saisie:
         idx_e = st.session_state['edit_item_idx']
+        # FIX : Utilisation d'une condition robuste pour éviter le ValueError
         edit_r = df.loc[idx_e] if idx_e is not None else None
-        with st.form("form_final", clear_on_submit=True):
+        
+        with st.form("form_v12", clear_on_submit=True):
             c1, c2 = st.columns(2)
             with c1:
                 l_gt = sorted(df['gros_titre'].unique().tolist()) if not df.empty else []
-                f_gt = st.selectbox("Dossier", [""] + l_gt, index=l_gt.index(edit_r['gros_titre'])+1 if edit_r and edit_r['gros_titre'] in l_gt else 0)
+                # FIX : Condition sécurisée pour index
+                idx_gt = l_gt.index(edit_r['gros_titre'])+1 if (edit_r is not None and edit_r['gros_titre'] in l_gt) else 0
+                f_gt = st.selectbox("Dossier", [""] + l_gt, index=idx_gt)
                 f_gt_n = st.text_input("OU Nouveau")
+                
                 l_t = sorted(df['titre'].unique().tolist()) if not df.empty else []
-                f_t = st.selectbox("Titre", [""] + l_t, index=l_t.index(edit_r['titre'])+1 if edit_r and edit_r['titre'] in l_t else 0)
+                idx_t = l_t.index(edit_r['titre'])+1 if (edit_r is not None and edit_r['titre'] in l_t) else 0
+                f_t = st.selectbox("Titre", [""] + l_t, index=idx_t)
                 f_t_n = st.text_input("OU Nouveau Titre")
             with c2:
                 f_c = st.text_area("Contenu", value=edit_r['contenu'] if edit_r is not None else "")
-                f_d = st.date_input("Date", value=edit_r['dt_obj'].date() if edit_r is not None and not pd.isna(edit_r['dt_obj']) else None)
-                f_h = st.time_input("Heure", value=edit_r['dt_obj'].time() if edit_r is not None and not pd.isna(edit_r['dt_obj']) else time(8,0))
+                f_d = st.date_input("Date", value=edit_r['dt_obj'].date() if (edit_r is not None and not pd.isna(edit_r['dt_obj'])) else None)
+                f_h = st.time_input("Heure", value=edit_r['dt_obj'].time() if (edit_r is not None and not pd.isna(edit_r['dt_obj'])) else time(8,0))
+            
             if st.form_submit_button("💾 Enregistrer"):
                 final_gt = f_gt_n if f_gt_n else f_gt
                 final_t = f_t_n if f_t_n else f_t
-                date_s = datetime.combine(f_d, f_h).strftime('%Y-%m-%d %H:%M:%S') if f_d else ""
+                date_s = datetime.combine(f_d, f_h).strftime('%Y-%m-%d %H:%M:%S') if f_date else ""
                 if idx_e is not None:
                     df.at[idx_e, 'gros_titre'], df.at[idx_e, 'titre'], df.at[idx_e, 'contenu'] = final_gt, final_t, f_c
                     df.at[idx_e, 'echeance'], df.at[idx_e, 'type'] = date_s, ("Task" if f_d else "Note")
