@@ -46,10 +46,8 @@ def upsert_calendar_event(row_data):
         else:
             start_body = {'dateTime': start_dt.isoformat(), 'timeZone': 'Europe/Paris'}
             end_body = {'dateTime': (start_dt + timedelta(minutes=30)).isoformat(), 'timeZone': 'Europe/Paris'}
-
         event_body = {'summary': row_data['titre'], 'location': row_data['gros_titre'], 
                       'description': row_data['contenu'], 'start': start_body, 'end': end_body}
-
         cal_id = str(row_data.get('cal_event_id', ""))
         if cal_id and cal_id.lower() not in ["", "nan", "none"]:
             try:
@@ -96,40 +94,42 @@ if "password_correct" not in st.session_state:
         else: st.error("Incorrect")
     st.stop()
 
-# --- INITIALISATION ---
+# --- INITIALISATION INTERFACE ---
 st.set_page_config(page_title="YounDesign PKM", layout="wide")
 df = load_data()
 now_ts = pd.Timestamp(datetime.now())
+
+# Indicateur Sidebar (Petite flèche pour mobile/PC)
+st.markdown("""
+    <div style='background-color: #f0f2f6; padding: 10px; border-radius: 10px; margin-bottom: 10px;'>
+        ⬅️ Cliquez sur la flèche en haut à gauche pour <b>Rechercher</b> ou <b>Tester les notifs</b>
+    </div>
+    """, unsafe_allow_html=True)
 
 if 'edit_item_idx' not in st.session_state: st.session_state['edit_item_idx'] = None
 
 # --- LOGIQUE REPORT RAPIDE ---
 def quick_reschedule(idx, days=0, weeks=0, months=0, years=0):
-    new_date = datetime.now() + timedelta(days=days, weeks=weeks + (months*4), hours=0)
+    new_date = datetime.now() + timedelta(days=days, weeks=weeks + (months*4.34), hours=0) # 4.34 pour un mois moyen
     if years > 0:
         try: new_date = new_date.replace(year=new_date.year + years)
-        except: new_date = new_date + timedelta(days=365) # Gestion année bissextile simple
-    
+        except: new_date = new_date + timedelta(days=365)
     new_date = new_date.replace(hour=8, minute=0, second=0)
     date_str = new_date.strftime('%Y-%m-%d %H:%M:%S')
-    
     df.at[idx, 'echeance'] = date_str
     df.at[idx, 'notif_sent'] = ""
-    
-    updated_row = df.loc[idx].to_dict()
-    new_cal = upsert_calendar_event(updated_row)
+    new_cal = upsert_calendar_event(df.loc[idx].to_dict())
     df.at[idx, 'cal_event_id'] = new_cal
-    
     save_data(df)
-    st.success(f"Reporté au {new_date.strftime('%d/%m/%Y')}")
+    st.success(f"Reporté !")
     st.rerun()
 
 # --- COMPOSANT CARTE ---
 def item_card(idx, row, is_overdue=False, key_suffix=""):
     color = "#FF4B4B" if is_overdue else "#31333F"
     with st.container(border=True):
-        if is_overdue: st.markdown("🚨 **PIMPON ! RETARD** 🚨", unsafe_allow_html=True)
-        c1, c2, c3, c4 = st.columns([0.1, 0.4, 0.4, 0.1])
+        if is_overdue: st.markdown("🚨 **PIMPON ! RETARD DÉPASSÉ** 🚨", unsafe_allow_html=True)
+        c1, c2, c3, c4 = st.columns([0.1, 0.45, 0.35, 0.1])
         
         with c1:
             if row['status'] != 'Terminé':
@@ -154,63 +154,82 @@ def item_card(idx, row, is_overdue=False, key_suffix=""):
         with c3:
             if row['type'] == 'Task' and not pd.isna(row['dt_obj']):
                 st.markdown(f"<span style='color:{color}'>📅 {row['dt_obj'].strftime('%d/%m/%Y %H:%M')}</span>", unsafe_allow_html=True)
-                
                 if row['status'] != 'Terminé':
-                    st.write("Reports rapides :")
-                    r1, r2, r3, r4 = st.columns(4)
-                    if r1.button("+1j", key=f"p1_{idx}_{key_suffix}", help="Demain 8h"): quick_reschedule(idx, days=1)
-                    if r2.button("+7j", key=f"p7_{idx}_{key_suffix}", help="Dans une semaine"): quick_reschedule(idx, weeks=1)
-                    if r3.button("+1m", key=f"p30_{idx}_{key_suffix}", help="Dans 30 jours"): quick_reschedule(idx, days=30)
-                    if r4.button("+1a", key=f"p1y_{idx}_{key_suffix}", help="L'année prochaine"): quick_reschedule(idx, years=1)
+                    # LE BOUTON DEMAIN (Comme avant)
+                    if st.button("⏩ Report demain 08h", key=f"q_{idx}_{key_suffix}"):
+                        quick_reschedule(idx, days=1)
+                    # LES AUTRES REPORTS (Groupés)
+                    with st.expander("Autres reports"):
+                        r1, r2, r3 = st.columns(3)
+                        if r1.button("+7j", key=f"p7_{idx}_{key_suffix}"): quick_reschedule(idx, weeks=1)
+                        if r2.button("+1m", key=f"p30_{idx}_{key_suffix}"): quick_reschedule(idx, days=30)
+                        if r3.button("+1a", key=f"p1y_{idx}_{key_suffix}"): quick_reschedule(idx, years=1)
             else: st.caption("📝 Note")
         
         with c4:
             if st.button("✏️", key=f"ed_{idx}_{key_suffix}"):
                 st.session_state['edit_item_idx'] = idx; st.rerun()
 
-# --- RECHERCHE & FILTRAGE ---
+# --- SIDEBAR (RECHERCHE & TOOLS) ---
 with st.sidebar:
     st.header("🔍 Recherche")
-    search = st.text_input("Terme à chercher...", "").lower()
-    if st.button("🔔 Test Notif"): send_notif("Test", "Signal Pimpon !")
-    if st.button("🚪 Déconnexion"): del st.session_state["password_correct"]; st.rerun()
+    search = st.text_input("Filtrer les tâches...", "").lower()
+    st.divider()
+    if st.button("🔔 Test Notif Téléphone"): 
+        send_notif("YounDesign", "Ça marche !", priority="high")
+        st.success("Envoyé !")
+    if st.button("🚪 Déconnexion"): 
+        del st.session_state["password_correct"]
+        st.rerun()
 
-# Application du filtre de recherche
+# --- FILTRAGE RECHERCHE ---
+df_filtered = df.copy()
 if search:
     df_filtered = df[
         df['titre'].str.lower().str.contains(search) | 
         df['contenu'].str.lower().str.contains(search) | 
         df['gros_titre'].str.lower().str.contains(search)
     ]
-else:
-    df_filtered = df
 
 # --- AFFICHAGE FORMULAIRE MODIF ---
 if st.session_state['edit_item_idx'] is not None:
-    # (Ici on utilise df et non df_filtered pour être sûr de trouver l'index original)
     edit_idx = st.session_state['edit_item_idx']
     edit_r = df.loc[edit_idx]
-    st.subheader("✏️ Modification")
+    st.subheader(f"✏️ Modification de : {edit_r['titre']}")
     with st.form("form_edit"):
-        c1, c2 = st.columns(2)
-        with c1:
+        col1, col2 = st.columns(2)
+        with col1:
             l_gt = sorted(list(set([str(x) for x in df['gros_titre'] if x])))
-            idx_gt = l_gt.index(edit_r['gros_titre'])+1 if (edit_r['gros_titre'] in l_gt) else 0
-            f_gt = st.selectbox("Dossier", [""] + l_gt, index=idx_gt)
-            f_gt_n = st.text_input("OU Nouveau Dossier")
+            f_gt = st.selectbox("Dossier", [""] + l_gt, index=l_gt.index(edit_r['gros_titre'])+1 if (edit_r['gros_titre'] in l_gt) else 0)
+            f_gt_n = st.text_input("Nouveau Dossier")
             l_t = sorted(list(set([str(x) for x in df['titre'] if x])))
-            idx_t = l_t.index(edit_r['titre'])+1 if (edit_r['titre'] in l_t) else 0
-            f_t = st.selectbox("Titre", [""] + l_t, index=idx_t)
-            f_t_n = st.text_input("OU Nouveau Titre")
-            f_gtype = st.radio("Type :", ["Événement (Heure)", "Tâche (Journée)"], index=0 if edit_r['google_type'] != "Tâche (Journée)" else 1)
-        with c2:
+            f_t = st.selectbox("Titre", [""] + l_t, index=l_t.index(edit_r['titre'])+1 if (edit_r['titre'] in l_t) else 0)
+            f_t_n = st.text_input("Nouveau Titre")
+        with col2:
             f_c = st.text_area("Contenu", value=edit_r['contenu'])
             f_d = st.date_input("Date", value=edit_r['dt_obj'].date() if not pd.isna(edit_r['dt_obj']) else None)
             f_h = st.time_input("Heure", value=edit_r['dt_obj'].time() if not pd.isna(edit_r['dt_obj']) else time(8,0))
-            f_img = st.file_uploader("Photo")
+            f_img = st.file_uploader("Changer Photo")
 
-        if st.form_submit_button("💾 ENREGISTRER"):
-            # ... Logique de sauvegarde identique à précédemment ...
+        if st.form_submit_button("💾 SAUVEGARDER LES MODIFICATIONS"):
+            f_gt_f, f_t_f = (f_gt_n if f_gt_n else f_gt), (f_t_n if f_t_n else f_t)
+            date_s = datetime.combine(f_d, f_h).strftime('%Y-%m-%d %H:%M:%S') if f_d else ""
+            b64 = str(edit_r['image_b64'])
+            if f_img:
+                img = Image.open(f_img)
+                if img.mode in ("RGBA", "P"): img = img.convert("RGB")
+                img.thumbnail((400, 400))
+                buf = io.BytesIO(); img.save(buf, format="JPEG", quality=70)
+                b64 = base64.b64encode(buf.getvalue()).decode()
+            
+            df.at[edit_idx, 'gros_titre'], df.at[edit_idx, 'titre'], df.at[edit_idx, 'contenu'] = f_gt_f, f_t_f, f_c
+            df.at[edit_idx, 'echeance'], df.at[edit_idx, 'type'], df.at[edit_idx, 'image_b64'] = date_s, ("Task" if f_d else "Note"), b64
+            df.at[edit_idx, 'notif_sent'] = ""
+            
+            new_cal = upsert_calendar_event(df.loc[edit_idx].to_dict())
+            df.at[edit_idx, 'cal_event_id'] = new_cal
+            
+            save_data(df)
             st.session_state['edit_item_idx'] = None
             st.rerun()
     if st.button("❌ Annuler"): st.session_state['edit_item_idx'] = None; st.rerun()
@@ -248,6 +267,42 @@ with tabs[5]: # ARCHIVE
     arc = df_filtered[df_filtered['status'] == 'Terminé'].copy()
     for idx, r in arc.sort_values('id', ascending=False).iterrows(): item_card(idx, r, key_suffix="arc")
 
-with tabs[6]: # SAISIE (Fonction identique au formulaire modif mais sans ID)
-    # (Le code de saisie normal est ici)
-    st.write("Saisie classique...")
+with tabs[6]: # SAISIE NOUVELLE
+    st.subheader("🖊️ Créer une nouvelle tâche")
+    with st.form("form_new"):
+        c1, c2 = st.columns(2)
+        with c1:
+            l_gt = sorted(list(set([str(x) for x in df['gros_titre'] if x])))
+            f_gt = st.selectbox("Dossier", [""] + l_gt)
+            f_gt_n = st.text_input("Nouveau Dossier")
+            l_t = sorted(list(set([str(x) for x in df['titre'] if x])))
+            f_t = st.selectbox("Titre", [""] + l_t)
+            f_t_n = st.text_input("Nouveau Titre")
+        with c2:
+            f_c = st.text_area("Contenu")
+            f_d = st.date_input("Date", value=None)
+            f_h = st.time_input("Heure", value=time(8,0))
+            f_img = st.file_uploader("Photo")
+        
+        if st.form_submit_button("💾 CRÉER"):
+            f_gt_f, f_t_f = (f_gt_n if f_gt_n else f_gt), (f_t_n if f_t_n else f_t)
+            date_s = datetime.combine(f_d, f_h).strftime('%Y-%m-%d %H:%M:%S') if f_d else ""
+            b64 = ""
+            if f_img:
+                img = Image.open(f_img)
+                if img.mode in ("RGBA", "P"): img = img.convert("RGB")
+                img.thumbnail((400, 400))
+                buf = io.BytesIO(); img.save(buf, format="JPEG", quality=70)
+                b64 = base64.b64encode(buf.getvalue()).decode()
+            
+            ids = pd.to_numeric(df['id'], errors='coerce').dropna()
+            nid = int(ids.max() + 1) if not ids.empty else 1
+            new_row = {"id": str(nid), "gros_titre": f_gt_f, "titre": f_t_f, "contenu": f_c, "echeance": date_s, 
+                       "type": ("Task" if f_d else "Note"), "status": "En cours", "image_b64": b64}
+            
+            new_cal = upsert_calendar_event(new_row)
+            new_row['cal_event_id'] = new_cal
+            
+            df = pd.concat([df, pd.DataFrame([new_row])], ignore_index=True)
+            save_data(df)
+            st.rerun()
