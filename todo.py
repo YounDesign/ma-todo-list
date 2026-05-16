@@ -28,10 +28,8 @@ def get_calendar_service():
     return build('calendar', 'v3', credentials=scoped_creds)
 
 def upsert_calendar_event(row_data):
-    """LIAISON : Crée ou MODIFIE l'événement existant via son ID."""
     if not row_data['echeance'] or row_data['type'] != "Task" or not CALENDAR_ID:
         return row_data.get('cal_event_id', "")
-    
     try:
         service = get_calendar_service()
         start_dt = pd.to_datetime(row_data['echeance'])
@@ -42,25 +40,18 @@ def upsert_calendar_event(row_data):
             'start': {'dateTime': start_dt.isoformat(), 'timeZone': 'Europe/Paris'},
             'end': {'dateTime': (start_dt + timedelta(minutes=30)).isoformat(), 'timeZone': 'Europe/Paris'},
         }
-
         cal_id = str(row_data.get('cal_event_id', ""))
-        
-        # Si on a un ID, on tente la MISE À JOUR
         if cal_id and cal_id not in ["", "nan", "None"]:
             try:
                 event = service.events().update(calendarId=CALENDAR_ID, eventId=cal_id, body=event_body).execute()
                 return event.get('id')
             except:
-                # Si l'ID n'existe plus sur Google, on en recrée un
                 event = service.events().insert(calendarId=CALENDAR_ID, body=event_body).execute()
                 return event.get('id')
         else:
-            # Sinon, NOUVEL ÉVÉNEMENT
             event = service.events().insert(calendarId=CALENDAR_ID, body=event_body).execute()
             return event.get('id')
-    except Exception as e:
-        st.error(f"Erreur Agenda : {e}")
-        return row_data.get('cal_event_id', "")
+    except: return row_data.get('cal_event_id', "")
 
 # --- CONNEXION & DATA ---
 conn = st.connection("gsheets", type=GSheetsConnection)
@@ -95,14 +86,78 @@ if "password_correct" not in st.session_state:
         else: st.error("Incorrect")
     st.stop()
 
-# --- INTERFACE ---
+# --- INITIALISATION INTERFACE ---
 st.set_page_config(page_title="YounDesign PKM", layout="wide")
 df = load_data()
 now_ts = pd.Timestamp(datetime.now())
 today = now_ts.date()
 
-if 'edit_item_idx' not in st.session_state: st.session_state['edit_item_idx'] = None
+if 'edit_item_idx' not in st.session_state: 
+    st.session_state['edit_item_idx'] = None
 
+# --- COMPOSANT FORMULAIRE (Unique pour Ajout et Modif) ---
+def show_saisie_form(idx_e=None):
+    edit_r = df.loc[idx_e] if idx_e is not None else None
+    st.subheader("🖊️ Saisie rapide" if idx_e is None else "✏️ Modification en cours")
+    
+    with st.form(f"form_{idx_e if idx_e else 'new'}"):
+        c1, c2 = st.columns(2)
+        with c1:
+            l_gt = sorted(list(set([str(x) for x in df['gros_titre'] if x])))
+            idx_gt = l_gt.index(edit_r['gros_titre'])+1 if (edit_r is not None and edit_r['gros_titre'] in l_gt) else 0
+            f_gt = st.selectbox("Dossier", [""] + l_gt, index=idx_gt)
+            f_gt_n = st.text_input("OU Nouveau Dossier")
+            l_t = sorted(list(set([str(x) for x in df['titre'] if x])))
+            idx_t = l_t.index(edit_r['titre'])+1 if (edit_r is not None and edit_r['titre'] in l_t) else 0
+            f_t = st.selectbox("Titre", [""] + l_t, index=idx_t)
+            f_t_n = st.text_input("OU Nouveau Titre")
+        with c2:
+            f_c = st.text_area("Contenu", value=edit_r['contenu'] if edit_r is not None else "")
+            f_d = st.date_input("Date", value=edit_r['dt_obj'].date() if (edit_r is not None and not pd.isna(edit_r['dt_obj'])) else None)
+            f_h = st.time_input("Heure", value=edit_r['dt_obj'].time() if (edit_r is not None and not pd.isna(edit_r['dt_obj'])) else time(8,0))
+            f_img = st.file_uploader("Photo", type=['jpg', 'png', 'jpeg'])
+
+        if st.form_submit_button("💾 ENREGISTRER TOUT"):
+            final_gt, final_t = (f_gt_n if f_gt_n else f_gt), (f_t_n if f_t_n else f_t)
+            date_s = datetime.combine(f_d, f_h).strftime('%Y-%m-%d %H:%M:%S') if f_d else ""
+            
+            # FIX IMAGE JPEG CRASH
+            b64 = edit_r['image_b64'] if (edit_r is not None) else ""
+            if f_img:
+                img = Image.open(f_img)
+                if img.mode in ("RGBA", "P"): # Convertir si transparence (PNG)
+                    img = img.convert("RGB")
+                img.thumbnail((400, 400))
+                buf = io.BytesIO()
+                img.save(buf, format="JPEG", quality=70) # Maintenant garanti RGB
+                b64 = base64.b64encode(buf.getvalue()).decode()
+            
+            temp_r = {'titre': final_t, 'gros_titre': final_gt, 'contenu': f_c, 'echeance': date_s, 'type': "Task" if f_d else "Note", 'cal_event_id': edit_r['cal_event_id'] if edit_r is not None else ""}
+            new_cal_id = upsert_calendar_event(temp_r)
+
+            if idx_e is not None:
+                df.at[idx_e, 'gros_titre'], df.at[idx_e, 'titre'], df.at[idx_e, 'contenu'] = final_gt, final_t, f_c
+                df.at[idx_e, 'echeance'], df.at[idx_e, 'type'], df.at[idx_e, 'image_b64'] = date_s, ("Task" if f_d else "Note"), b64
+                df.at[idx_e, 'cal_event_id'] = new_cal_id
+                df.at[idx_e, 'notif_sent'] = ""
+            else:
+                ids = pd.to_numeric(df['id'], errors='coerce').dropna()
+                nid = int(ids.max() + 1) if not ids.empty else 1
+                new_row = {"id": str(nid), "gros_titre": final_gt, "titre": final_t, "contenu": f_c, "echeance": date_s, "type": ("Task" if f_d else "Note"), "status": "En cours", "date_archive": "", "image_b64": b64, "notif_sent": "", "cal_event_id": new_cal_id}
+                global df
+                df = pd.concat([df, pd.DataFrame([new_row])], ignore_index=True)
+            
+            save_data(df)
+            st.session_state['edit_item_idx'] = None
+            st.success("Synchronisé !")
+            st.rerun()
+    
+    if idx_e is not None:
+        if st.button("❌ Annuler la modification"):
+            st.session_state['edit_item_idx'] = None
+            st.rerun()
+
+# --- COMPOSANT CARTE ---
 def item_card(idx, row, is_overdue=False, key_suffix=""):
     color = "#FF4B4B" if is_overdue else "#31333F"
     with st.container(border=True):
@@ -129,98 +184,53 @@ def item_card(idx, row, is_overdue=False, key_suffix=""):
             else: st.caption("📝 Note")
         with c4:
             if st.button("✏️", key=f"ed_{idx}_{key_suffix}"):
-                st.session_state['edit_item_idx'] = idx; st.rerun()
+                st.session_state['edit_item_idx'] = idx
+                st.rerun()
 
-# --- ONGLETS ---
+# --- LOGIQUE D'AFFICHAGE ---
+# Si on est en train de modifier, on affiche le formulaire DIRECTEMENT en haut
+if st.session_state['edit_item_idx'] is not None:
+    show_saisie_form(st.session_state['edit_item_idx'])
+    st.divider()
+
+# Ensuite on affiche les onglets normaux
 tabs = st.tabs(["☀️ Jour", "📅 Semaine", "📊 Mois", "📂 Thèmes", "📝 Notes", "🗄️ Archive", "🖊️ Saisie"])
 active = df[df['status'] == 'En cours']
 
-with tabs[0]: # JOUR
+with tabs[0]:
     ov = active[(active['type'] == 'Task') & (active['dt_obj'] < now_ts)]
     for idx, r in ov.iterrows(): item_card(idx, r, is_overdue=True, key_suffix="ov")
     tod = active[(active['type'] == 'Task') & (active['dt_obj'].dt.date == today) & (active['dt_obj'] >= now_ts)]
     for idx, r in tod.iterrows(): item_card(idx, r, key_suffix="tod")
 
-with tabs[1]: # SEMAINE
+with tabs[1]:
     wk = active[(active['dt_obj'].dt.date > today) & (active['dt_obj'].dt.date <= today + timedelta(days=7))]
     for idx, r in wk.iterrows(): item_card(idx, r, key_suffix="wk")
 
-with tabs[2]: # MOIS
+with tabs[2]:
     mo = active[(active['dt_obj'].dt.date > today + timedelta(days=7)) & (active['dt_obj'].dt.date <= today + timedelta(days=30))]
     for idx, r in mo.iterrows(): item_card(idx, r, key_suffix="mo")
 
-with tabs[3]: # THEMES
+with tabs[3]:
     for gt in sorted(active['gros_titre'].unique()):
         with st.expander(f"📁 {gt}"):
             for idx, r in active[active['gros_titre'] == gt].iterrows(): item_card(idx, r, key_suffix="th")
 
-with tabs[4]: # NOTES
+with tabs[4]:
     for idx, r in active[active['type'] == 'Note'].iterrows(): item_card(idx, r, key_suffix="nt")
 
-with tabs[5]: # ARCHIVE
+with tabs[5]:
     arc = df[df['status'] == 'Terminé']
     for idx, r in arc.sort_values('date_archive', ascending=False).iterrows(): item_card(idx, r, key_suffix="arc")
 
-with tabs[6]: # SAISIE
-    idx_e = st.session_state['edit_item_idx']
-    edit_r = df.loc[idx_e] if idx_e is not None else None
-    st.header("🖊️ Saisie" if idx_e is None else "✏️ Modification")
-    with st.form("form_final"):
-        c1, c2 = st.columns(2)
-        with c1:
-            l_gt = sorted(list(set([str(x) for x in df['gros_titre'] if x])))
-            idx_gt = l_gt.index(edit_r['gros_titre'])+1 if (edit_r is not None and edit_r['gros_titre'] in l_gt) else 0
-            f_gt = st.selectbox("Dossier", [""] + l_gt, index=idx_gt)
-            f_gt_n = st.text_input("OU Nouveau Dossier")
-            l_t = sorted(list(set([str(x) for x in df['titre'] if x])))
-            idx_t = l_t.index(edit_r['titre'])+1 if (edit_r is not None and edit_r['titre'] in l_t) else 0
-            f_t = st.selectbox("Titre", [""] + l_t, index=idx_t)
-            f_t_n = st.text_input("OU Nouveau Titre")
-        with c2:
-            f_c = st.text_area("Contenu", value=edit_r['contenu'] if edit_r is not None else "")
-            f_d = st.date_input("Date", value=edit_r['dt_obj'].date() if (edit_r is not None and not pd.isna(edit_r['dt_obj'])) else None)
-            f_h = st.time_input("Heure", value=edit_r['dt_obj'].time() if (edit_r is not None and not pd.isna(edit_r['dt_obj'])) else time(8,0))
-            f_img = st.file_uploader("Photo", type=['jpg', 'png', 'jpeg'])
-
-        if st.form_submit_button("💾 ENREGISTRER TOUT"):
-            final_gt, final_t = (f_gt_n if f_gt_n else f_gt), (f_t_n if f_t_n else f_t)
-            date_s = datetime.combine(f_d, f_h).strftime('%Y-%m-%d %H:%M:%S') if f_d else ""
-            
-            b64 = edit_r['image_b64'] if edit_r is not None else ""
-            if f_img:
-                img = Image.open(f_img); img.thumbnail((400, 400))
-                buf = io.BytesIO(); img.save(buf, format="JPEG", quality=70)
-                b64 = base64.b64encode(buf.getvalue()).decode()
-            
-            # --- LOGIQUE LIAISON AGENDA ---
-            temp_r = {
-                'titre': final_t, 'gros_titre': final_gt, 'contenu': f_c, 
-                'echeance': date_s, 'type': "Task" if f_d else "Note", 
-                'cal_event_id': edit_r['cal_event_id'] if edit_r is not None else ""
-            }
-            new_cal_id = upsert_calendar_event(temp_r)
-
-            if idx_e is not None:
-                # MISE À JOUR
-                df.at[idx_e, 'gros_titre'], df.at[idx_e, 'titre'], df.at[idx_e, 'contenu'] = final_gt, final_t, f_c
-                df.at[idx_e, 'echeance'], df.at[idx_e, 'type'], df.at[idx_e, 'image_b64'] = date_s, ("Task" if f_d else "Note"), b64
-                df.at[idx_e, 'cal_event_id'] = new_cal_id
-                df.at[idx_e, 'notif_sent'] = ""
-            else:
-                # NOUVEL AJOUT
-                ids = pd.to_numeric(df['id'], errors='coerce').dropna()
-                nid = int(ids.max() + 1) if not ids.empty else 1
-                new_row = {
-                    "id": str(nid), "gros_titre": final_gt, "titre": final_t, "contenu": f_c, 
-                    "echeance": date_s, "type": ("Task" if f_d else "Note"), "status": "En cours", 
-                    "date_archive": "", "image_b64": b64, "notif_sent": "", "cal_event_id": new_cal_id
-                }
-                df = pd.concat([df, pd.DataFrame([new_row])], ignore_index=True)
-            
-            save_data(df)
-            st.session_state['edit_item_idx'] = None
-            st.rerun()
+with tabs[6]:
+    if st.session_state['edit_item_idx'] is None:
+        show_saisie_form()
+    else:
+        st.info("Formulaire de modification affiché en haut de page.")
 
 with st.sidebar:
     if st.button("🔔 Test Notif"): send_notif("Test", "Liaison OK !")
-    if st.button("🚪 Déconnexion"): del st.session_state["password_correct"]; st.rerun()
+    if st.button("🚪 Déconnexion"): 
+        del st.session_state["password_correct"]
+        st.rerun()
