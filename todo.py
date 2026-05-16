@@ -58,15 +58,15 @@ conn = st.connection("gsheets", type=GSheetsConnection)
 
 def load_data():
     try:
-        df = conn.read(ttl=0).dropna(subset=['gros_titre', 'titre'], how='all')
+        df_loaded = conn.read(ttl=0).dropna(subset=['gros_titre', 'titre'], how='all')
         cols = ['id', 'status', 'date_archive', 'image_b64', 'notif_sent', 'gros_titre', 'titre', 'echeance', 'contenu', 'type', 'cal_event_id']
         for col in cols:
-            if col not in df.columns: df[col] = ""
-            df[col] = df[col].astype(str).replace('nan', '')
-        df.loc[df['status'] == "", 'status'] = 'En cours'
-        df['dt_obj'] = pd.to_datetime(df['echeance'], errors='coerce')
-        df['date_archive_dt'] = pd.to_datetime(df['date_archive'], errors='coerce')
-        return df
+            if col not in df_loaded.columns: df_loaded[col] = ""
+            df_loaded[col] = df_loaded[col].astype(str).replace('nan', '')
+        df_loaded.loc[df_loaded['status'] == "", 'status'] = 'En cours'
+        df_loaded['dt_obj'] = pd.to_datetime(df_loaded['echeance'], errors='coerce')
+        df_loaded['date_archive_dt'] = pd.to_datetime(df_loaded['date_archive'], errors='coerce')
+        return df_loaded
     except:
         return pd.DataFrame(columns=['id', 'status', 'date_archive', 'image_b64', 'notif_sent', 'gros_titre', 'titre', 'echeance', 'contenu', 'type', 'cal_event_id'])
 
@@ -95,8 +95,9 @@ today = now_ts.date()
 if 'edit_item_idx' not in st.session_state: 
     st.session_state['edit_item_idx'] = None
 
-# --- COMPOSANT FORMULAIRE (Unique pour Ajout et Modif) ---
+# --- COMPOSANT FORMULAIRE ---
 def show_saisie_form(idx_e=None):
+    global df # Déclaration obligatoire au début de la fonction
     edit_r = df.loc[idx_e] if idx_e is not None else None
     st.subheader("🖊️ Saisie rapide" if idx_e is None else "✏️ Modification en cours")
     
@@ -121,15 +122,14 @@ def show_saisie_form(idx_e=None):
             final_gt, final_t = (f_gt_n if f_gt_n else f_gt), (f_t_n if f_t_n else f_t)
             date_s = datetime.combine(f_d, f_h).strftime('%Y-%m-%d %H:%M:%S') if f_d else ""
             
-            # FIX IMAGE JPEG CRASH
             b64 = edit_r['image_b64'] if (edit_r is not None) else ""
             if f_img:
                 img = Image.open(f_img)
-                if img.mode in ("RGBA", "P"): # Convertir si transparence (PNG)
+                if img.mode in ("RGBA", "P"): 
                     img = img.convert("RGB")
                 img.thumbnail((400, 400))
                 buf = io.BytesIO()
-                img.save(buf, format="JPEG", quality=70) # Maintenant garanti RGB
+                img.save(buf, format="JPEG", quality=70)
                 b64 = base64.b64encode(buf.getvalue()).decode()
             
             temp_r = {'titre': final_t, 'gros_titre': final_gt, 'contenu': f_c, 'echeance': date_s, 'type': "Task" if f_d else "Note", 'cal_event_id': edit_r['cal_event_id'] if edit_r is not None else ""}
@@ -144,16 +144,9 @@ def show_saisie_form(idx_e=None):
                 ids = pd.to_numeric(df['id'], errors='coerce').dropna()
                 nid = int(ids.max() + 1) if not ids.empty else 1
                 new_row = {"id": str(nid), "gros_titre": final_gt, "titre": final_t, "contenu": f_c, "echeance": date_s, "type": ("Task" if f_d else "Note"), "status": "En cours", "date_archive": "", "image_b64": b64, "notif_sent": "", "cal_event_id": new_cal_id}
-                global df
                 df = pd.concat([df, pd.DataFrame([new_row])], ignore_index=True)
             
             save_data(df)
-            st.session_state['edit_item_idx'] = None
-            st.success("Synchronisé !")
-            st.rerun()
-    
-    if idx_e is not None:
-        if st.button("❌ Annuler la modification"):
             st.session_state['edit_item_idx'] = None
             st.rerun()
 
@@ -187,47 +180,47 @@ def item_card(idx, row, is_overdue=False, key_suffix=""):
                 st.session_state['edit_item_idx'] = idx
                 st.rerun()
 
-# --- LOGIQUE D'AFFICHAGE ---
-# Si on est en train de modifier, on affiche le formulaire DIRECTEMENT en haut
+# --- AFFICHAGE ---
 if st.session_state['edit_item_idx'] is not None:
     show_saisie_form(st.session_state['edit_item_idx'])
+    if st.button("❌ Annuler la modification"):
+        st.session_state['edit_item_idx'] = None
+        st.rerun()
     st.divider()
 
-# Ensuite on affiche les onglets normaux
 tabs = st.tabs(["☀️ Jour", "📅 Semaine", "📊 Mois", "📂 Thèmes", "📝 Notes", "🗄️ Archive", "🖊️ Saisie"])
 active = df[df['status'] == 'En cours']
 
-with tabs[0]:
+with tabs[0]: # JOUR
     ov = active[(active['type'] == 'Task') & (active['dt_obj'] < now_ts)]
     for idx, r in ov.iterrows(): item_card(idx, r, is_overdue=True, key_suffix="ov")
     tod = active[(active['type'] == 'Task') & (active['dt_obj'].dt.date == today) & (active['dt_obj'] >= now_ts)]
     for idx, r in tod.iterrows(): item_card(idx, r, key_suffix="tod")
 
-with tabs[1]:
+with tabs[1]: # SEMAINE
     wk = active[(active['dt_obj'].dt.date > today) & (active['dt_obj'].dt.date <= today + timedelta(days=7))]
     for idx, r in wk.iterrows(): item_card(idx, r, key_suffix="wk")
 
-with tabs[2]:
+with tabs[2]: # MOIS
     mo = active[(active['dt_obj'].dt.date > today + timedelta(days=7)) & (active['dt_obj'].dt.date <= today + timedelta(days=30))]
     for idx, r in mo.iterrows(): item_card(idx, r, key_suffix="mo")
 
-with tabs[3]:
+with tabs[3]: # THEMES
     for gt in sorted(active['gros_titre'].unique()):
         with st.expander(f"📁 {gt}"):
             for idx, r in active[active['gros_titre'] == gt].iterrows(): item_card(idx, r, key_suffix="th")
 
-with tabs[4]:
+with tabs[4]: # NOTES
     for idx, r in active[active['type'] == 'Note'].iterrows(): item_card(idx, r, key_suffix="nt")
 
-with tabs[5]:
+with tabs[5]: # ARCHIVE
     arc = df[df['status'] == 'Terminé']
     for idx, r in arc.sort_values('date_archive', ascending=False).iterrows(): item_card(idx, r, key_suffix="arc")
 
-with tabs[6]:
+with tabs[6]: # SAISIE
     if st.session_state['edit_item_idx'] is None:
         show_saisie_form()
-    else:
-        st.info("Formulaire de modification affiché en haut de page.")
+    else: st.info("Modif en cours en haut de page.")
 
 with st.sidebar:
     if st.button("🔔 Test Notif"): send_notif("Test", "Liaison OK !")
