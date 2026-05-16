@@ -9,7 +9,7 @@ from PIL import Image
 from googleapiclient.discovery import build
 from google.oauth2 import service_account
 
-# --- CONFIGURATION ---
+# --- CONFIGURATION (Secrets) ---
 NTFY_TOPIC = st.secrets.get("ntfy_topic", "youndesign_pkm_secret")
 CALENDAR_ID = st.secrets.get("calendar_id", "")
 
@@ -32,7 +32,7 @@ def delete_calendar_event(cal_id):
     try:
         service = get_calendar_service()
         service.events().delete(calendarId=CALENDAR_ID, eventId=str(cal_id)).execute()
-        st.toast("🗑️ Agenda nettoyé")
+        st.toast("🗑️ Supprimé de Google")
     except: pass
 
 def upsert_calendar_event(row_data):
@@ -83,10 +83,8 @@ def load_data():
         for col in cols:
             if col not in df_loaded.columns: df_loaded[col] = ""
             df_loaded[col] = df_loaded[col].astype(str).replace('nan', '').fillna('')
-        # Nettoyage strict du statut
         df_loaded['status'] = df_loaded['status'].str.strip()
         df_loaded.loc[df_loaded['status'] == "", 'status'] = 'En cours'
-        # Conversion Date Robuste
         df_loaded['dt_obj'] = pd.to_datetime(df_loaded['echeance'], errors='coerce')
         return df_loaded
     except:
@@ -109,11 +107,13 @@ if "password_correct" not in st.session_state:
         else: st.error("Incorrect")
     st.stop()
 
-# --- INITIALISATION ---
+# --- INITIALISATION INTERFACE ---
 st.set_page_config(page_title="YounDesign PKM", layout="wide")
 df = load_data()
-now = datetime.now()
-today = now.date()
+
+# Dates fixées en format Timestamp pour éviter le bug de comparaison
+now_dt = pd.Timestamp(datetime.now())
+today_dt = pd.Timestamp(datetime.now().date())
 
 if 'edit_item_idx' not in st.session_state: st.session_state['edit_item_idx'] = None
 
@@ -133,12 +133,13 @@ def quick_reschedule(idx, days=0, weeks=0, months=0, years=0):
 # --- COMPOSANT CARTE ---
 def item_card(idx, row, is_overdue=False, key_suffix=""):
     cat_color, cat_emoji = get_category_style(row['gros_titre'])
-    overdue_style = "border: 3px solid #FF4B4B; background-color: #fff1f1;" if is_overdue else f"border-left: 8px solid {cat_color};"
+    overdue_style = "border: 4px solid #FF4B4B; background-color: #fff1f1;" if is_overdue else f"border-left: 10px solid {cat_color};"
     
-    st.markdown(f"""<div style='{overdue_style} padding:15px; border-radius:10px; margin-bottom:10px; background-color:white; box-shadow: 2px 2px 5px rgba(0,0,0,0.05);'>
+    st.markdown(f"""<div style='{overdue_style} padding:15px; border-radius:10px; margin-bottom:10px; background-color:white; box-shadow: 2px 2px 5px rgba(0,0,0,0.1);'>
+        { "🚨 <b style='color:red;'>PIMPON ! RETARD DÉPASSÉ</b> 🚨" if is_overdue else "" }
         <div style='display:flex; justify-content:space-between;'><span style='color:{cat_color}; font-weight:bold;'>{cat_emoji} {row['gros_titre']}</span></div>
         <div style='font-size:1.2em; font-weight:bold; margin-top:5px;'>{'📌' if row['google_type'] == 'Tâche (Journée)' else '⏰'} {row['titre']}</div>
-        <div style='color:#555; margin-top:5px;'>{row['contenu']}</div></div>""", unsafe_allow_html=True)
+        <div style='color:#333; margin-top:5px; white-space: pre-wrap;'>{row['contenu']}</div></div>""", unsafe_allow_html=True)
     
     c1, c2, c3 = st.columns([0.2, 0.6, 0.2])
     with c1:
@@ -159,116 +160,139 @@ def item_card(idx, row, is_overdue=False, key_suffix=""):
             if row['status'] == 'En cours':
                 cr1, cr2 = st.columns(2)
                 if cr1.button("⏩ Demain 08h", key=f"q_{idx}_{key_suffix}"): quick_reschedule(idx, days=1)
-                with cr2.expander("Autres..."):
+                with cr2.expander("Autres reports"):
                     if st.button("+7j", key=f"p7_{idx}_{key_suffix}"): quick_reschedule(idx, weeks=1)
                     if st.button("+30j", key=f"p30_{idx}_{key_suffix}"): quick_reschedule(idx, days=30)
                     if st.button("+1an", key=f"p1y_{idx}_{key_suffix}"): quick_reschedule(idx, years=1)
         img_raw = row.get('image_b64', "")
         if isinstance(img_raw, str) and len(img_raw) > 50:
-            try: st.image(base64.b64decode(img_raw), width=200)
+            try: st.image(base64.b64decode(img_raw), width=250)
             except: pass
     with c3:
         if st.button("✏️", key=f"ed_{idx}_{key_suffix}"):
             st.session_state['edit_item_idx'] = idx; st.rerun()
     st.divider()
 
-# --- FORMULAIRE ---
-def show_saisie_form(idx_e=None):
-    global df
-    edit_r = df.loc[idx_e] if idx_e is not None else None
-    st.subheader("🖊️ Saisie" if idx_e is None else "✏️ Modification")
-    with st.form(f"f_{idx_e if idx_e is not None else 'new'}"):
-        c1, c2 = st.columns(2)
-        with c1:
-            l_gt = sorted(list(set([str(x) for x in df['gros_titre'] if x])))
-            idx_gt = l_gt.index(edit_r['gros_titre'])+1 if (edit_r is not None and edit_r['gros_titre'] in l_gt) else 0
-            f_gt = st.selectbox("Dossier", [""] + l_gt, index=idx_gt)
-            f_gt_n = st.text_input("OU Nouveau Dossier")
-            l_t = sorted(list(set([str(x) for x in df['titre'] if x])))
-            idx_t = l_t.index(edit_r['titre'])+1 if (edit_r is not None and edit_r['titre'] in l_t) else 0
-            f_t = st.selectbox("Titre", [""] + l_t, index=idx_t)
-            f_t_n = st.text_input("OU Nouveau Titre")
-            f_gtype = st.radio("Type :", ["Événement (Heure)", "Tâche (Journée)"], index=0 if (edit_r is None or edit_r['google_type'] != "Tâche (Journée)") else 1)
-        with c2:
-            f_c = st.text_area("Contenu", value=edit_r['contenu'] if edit_r is not None else "")
-            f_d = st.date_input("Date", value=edit_r['dt_obj'].date() if (edit_r is not None and not pd.isna(edit_r['dt_obj'])) else None)
-            f_h = st.time_input("Heure", value=edit_r['dt_obj'].time() if (edit_r is not None and not pd.isna(edit_r['dt_obj'])) else time(8,0))
-            f_img = st.file_uploader("Photo")
-        
-        if st.form_submit_button("💾 ENREGISTRER"):
-            f_gt_f, f_t_f = (f_gt_n if f_gt_n else f_gt), (f_t_n if f_t_n else f_t)
-            date_s = datetime.combine(f_d, f_h).strftime('%Y-%m-%d %H:%M:%S') if f_d else ""
-            b64 = str(edit_r['image_b64']) if edit_r is not None else ""
-            if f_img:
-                img = Image.open(f_img)
-                if img.mode in ("RGBA", "P"): img = img.convert("RGB")
-                img.thumbnail((400, 400))
-                buf = io.BytesIO(); img.save(buf, format="JPEG", quality=70); b64 = base64.b64encode(buf.getvalue()).decode()
-            
-            temp_r = {'titre': f_t_f, 'gros_titre': f_gt_f, 'contenu': f_c, 'echeance': date_s, 'type': "Task" if f_d else "Note", 'cal_event_id': edit_r['cal_event_id'] if edit_r is not None else "", 'google_type': f_gtype}
-            new_cal = upsert_calendar_event(temp_r)
-
-            if idx_e is not None:
-                df.at[idx_e, 'gros_titre'], df.at[idx_e, 'titre'], df.at[idx_e, 'contenu'] = f_gt_f, f_t_f, f_c
-                df.at[idx_e, 'echeance'], df.at[idx_e, 'type'], df.at[idx_e, 'image_b64'] = date_s, ("Task" if f_d else "Note"), b64
-                df.at[idx_e, 'cal_event_id'], df.at[idx_e, 'google_type'] = new_cal, f_gtype
-            else:
-                nid = int(pd.to_numeric(df['id'], errors='coerce').max() + 1) if not df.empty else 1
-                nr = {"id": str(nid), "gros_titre": f_gt_f, "titre": f_t_f, "contenu": f_c, "echeance": date_s, "type": ("Task" if f_d else "Note"), "status": "En cours", "image_b64": b64, "cal_event_id": new_cal, "google_type": f_gtype}
-                df = pd.concat([df, pd.DataFrame([nr])], ignore_index=True)
-            save_data(df); st.session_state['edit_item_idx'] = None; st.rerun()
-
-# --- SIDEBAR & RECHERCHE ---
+# --- SIDEBAR ---
 with st.sidebar:
-    st.header("🔍 Recherche")
-    search = st.text_input("Filtrer...", "").lower()
+    st.markdown("### 🔍 Recherche & Outils")
+    search = st.text_input("Filtrer les tâches...", "").lower()
     st.divider()
+    if st.button("🔔 Test Notif"): send_notif("YounDesign", "Signal Pimpon !")
     if st.button("🚪 Déconnexion"): del st.session_state["password_correct"]; st.rerun()
+    st.info("⬅️ Utilisez les onglets pour naviguer")
 
 # --- FILTRAGE ---
 df_f = df.copy()
 if search:
     df_f = df[df['titre'].str.lower().str.contains(search) | df['contenu'].str.lower().str.contains(search) | df['gros_titre'].str.lower().str.contains(search)]
 
+# --- MODIF PRIORITAIRE ---
 if st.session_state['edit_item_idx'] is not None:
-    show_saisie_form(st.session_state['edit_item_idx'])
-    if st.button("❌ Annuler"): st.session_state['edit_item_idx'] = None; st.rerun()
-    st.divider()
+    edit_idx = st.session_state['edit_item_idx']
+    try:
+        edit_r = df.loc[edit_idx]
+        st.warning(f"✏️ Modification de : {edit_r['titre']}")
+        with st.form("form_edit"):
+            c1, c2 = st.columns(2)
+            with c1:
+                l_gt = sorted(list(set([str(x) for x in df['gros_titre'] if x])))
+                idx_gt = l_gt.index(edit_r['gros_titre'])+1 if (edit_r['gros_titre'] in l_gt) else 0
+                f_gt = st.selectbox("Dossier", [""] + l_gt, index=idx_gt)
+                f_gt_n = st.text_input("Nouveau Dossier")
+                l_t = sorted(list(set([str(x) for x in df['titre'] if x])))
+                idx_t = l_t.index(edit_r['titre'])+1 if (edit_r['titre'] in l_t) else 0
+                f_t = st.selectbox("Titre", [""] + l_t, index=idx_t)
+                f_t_n = st.text_input("Nouveau Titre")
+                f_gtype = st.radio("Type :", ["Événement (Heure)", "Tâche (Journée)"], index=0 if edit_r['google_type'] != "Tâche (Journée)" else 1)
+            with c2:
+                f_c = st.text_area("Contenu", value=edit_r['contenu'])
+                f_d = st.date_input("Date", value=edit_r['dt_obj'].date() if not pd.isna(edit_r['dt_obj']) else None)
+                f_h = st.time_input("Heure", value=edit_r['dt_obj'].time() if not pd.isna(edit_r['dt_obj']) else time(8,0))
+                f_img = st.file_uploader("Photo")
+            
+            if st.form_submit_button("💾 SAUVEGARDER"):
+                f_gt_f, f_t_f = (f_gt_n if f_gt_n else f_gt), (f_t_n if f_t_n else f_t)
+                date_s = datetime.combine(f_d, f_h).strftime('%Y-%m-%d %H:%M:%S') if f_d else ""
+                b64 = str(edit_r['image_b64'])
+                if f_img:
+                    img = Image.open(f_img)
+                    if img.mode in ("RGBA", "P"): img = img.convert("RGB")
+                    img.thumbnail((400, 400))
+                    buf = io.BytesIO(); img.save(buf, format="JPEG", quality=70); b64 = base64.b64encode(buf.getvalue()).decode()
+                
+                df.at[edit_idx, 'gros_titre'], df.at[edit_idx, 'titre'], df.at[edit_idx, 'contenu'] = f_gt_f, f_t_f, f_c
+                df.at[edit_idx, 'echeance'], df.at[edit_idx, 'type'], df.at[edit_idx, 'image_b64'] = date_s, ("Task" if f_d else "Note"), b64
+                df.at[edit_idx, 'cal_event_id'], df.at[edit_idx, 'google_type'] = upsert_calendar_event(df.loc[edit_idx].to_dict()), f_gtype
+                save_data(df); st.session_state['edit_item_idx'] = None; st.rerun()
+        if st.button("❌ Annuler"): st.session_state['edit_item_idx'] = None; st.rerun()
+    except: st.session_state['edit_item_idx'] = None; st.rerun()
 
 # --- ONGLETS ---
-tabs = st.tabs(["☀️ Jour", "📅 Semaine", "📊 Mois", "📂 Thèmes", "📝 Notes", "🗄️ Archive", "🖊️ Saisie"])
+t_day, t_wk, t_mo, t_th, t_nt, t_arc, t_new = st.tabs(["☀️ Jour", "📅 Semaine", "📊 Mois", "📂 Thèmes", "📝 Notes", "🗄️ Archive", "🖊️ Saisie"])
 active = df_f[df_f['status'] == 'En cours'].copy()
 if not active.empty: active = active.sort_values('dt_obj', ascending=True)
 
-with tabs[0]: # JOUR
-    ov = active[(active['type'] == 'Task') & (active['dt_obj'] < now)]
+with t_day:
+    # Retards : dt_obj < aujourd'hui (début de journée)
+    ov = active[(active['type'] == 'Task') & (active['dt_obj'] < now_dt)]
     for idx, r in ov.iterrows(): item_card(idx, r, is_overdue=True, key_suffix="ov")
-    tod = active[(active['type'] == 'Task') & (active['dt_obj'].dt.date == today) & (active['dt_obj'] >= now)]
+    # Aujourd'hui : dt_obj est aujourd'hui
+    tod = active[(active['type'] == 'Task') & (active['dt_obj'] >= today_dt) & (active['dt_obj'] < today_dt + timedelta(days=1))]
     for idx, r in tod.iterrows(): item_card(idx, r, key_suffix="tod")
     if ov.empty and tod.empty: st.info("Rien pour aujourd'hui.")
 
-with tabs[1]: # SEMAINE
-    wk = active[(active['type'] == 'Task') & (active['dt_obj'].dt.date > today) & (active['dt_obj'].dt.date <= today + timedelta(days=7))]
+with t_wk:
+    wk = active[(active['type'] == 'Task') & (active['dt_obj'] >= today_dt + timedelta(days=1)) & (active['dt_obj'] < today_dt + timedelta(days=8))]
     for idx, r in wk.iterrows(): item_card(idx, r, key_suffix="wk")
 
-with tabs[2]: # MOIS
-    mo = active[(active['type'] == 'Task') & (active['dt_obj'].dt.date > today) & (active['dt_obj'].dt.date <= today + timedelta(days=30))]
+with t_mo:
+    mo = active[(active['type'] == 'Task') & (active['dt_obj'] >= today_dt + timedelta(days=1)) & (active['dt_obj'] < today_dt + timedelta(days=31))]
     for idx, r in mo.iterrows(): item_card(idx, r, key_suffix="mo")
 
-with tabs[3]: # THEMES
+with t_th:
     for gt in sorted(active['gros_titre'].unique()):
         col, emo = get_category_style(gt)
         with st.expander(f"{emo} {gt}"):
             sub = active[active['gros_titre'] == gt]
             for idx, r in sub.iterrows(): item_card(idx, r, key_suffix="th")
 
-with tabs[4]: # NOTES
+with t_nt:
     nt = active[active['type'] == 'Note']
     for idx, r in nt.iterrows(): item_card(idx, r, key_suffix="nt")
 
-with tabs[5]: # ARCHIVE
+with t_arc:
     arc = df_f[df_f['status'] == 'Terminé']
-    for idx, r in arc.sort_values('id', ascending=False).iterrows(): item_card(idx, r, key_suffix="arc")
+    for idx, r in arc.sort_values('date_archive', ascending=False).iterrows(): item_card(idx, r, key_suffix="arc")
 
-with tabs[6]: # SAISIE
-    if st.session_state['edit_item_idx'] is None: show_saisie_form()
+with t_new:
+    st.subheader("🖊️ Nouvelle tâche")
+    with st.form("f_new"):
+        c1, c2 = st.columns(2)
+        with c1:
+            l_gt = sorted(list(set([str(x) for x in df['gros_titre'] if x])))
+            f_gt = st.selectbox("Dossier", [""] + l_gt)
+            f_gt_n = st.text_input("Nouveau Dossier")
+            l_t = sorted(list(set([str(x) for x in df['titre'] if x])))
+            f_t = st.selectbox("Titre", [""] + l_t)
+            f_t_n = st.text_input("Nouveau Titre")
+            f_gtype = st.radio("Type :", ["Événement (Heure)", "Tâche (Journée)"])
+        with c2:
+            f_c = st.text_area("Contenu")
+            f_d = st.date_input("Date", value=None)
+            f_h = st.time_input("Heure", value=time(8,0))
+            f_img = st.file_uploader("Photo")
+        if st.form_submit_button("💾 CRÉER"):
+            f_gt_f, f_t_f = (f_gt_n if f_gt_n else f_gt), (f_t_n if f_t_n else f_t)
+            date_s = datetime.combine(f_d, f_h).strftime('%Y-%m-%d %H:%M:%S') if f_d else ""
+            b64 = ""
+            if f_img:
+                img = Image.open(f_img)
+                if img.mode in ("RGBA", "P"): img = img.convert("RGB")
+                img.thumbnail((400, 400))
+                buf = io.BytesIO(); img.save(buf, format="JPEG", quality=70); b64 = base64.b64encode(buf.getvalue()).decode()
+            nid = int(pd.to_numeric(df['id'], errors='coerce').max() + 1) if not df.empty else 1
+            nr = {"id": str(nid), "gros_titre": f_gt_f, "titre": f_t_f, "contenu": f_c, "echeance": date_s, "type": ("Task" if f_d else "Note"), "status": "En cours", "image_b64": b64, "google_type": f_gtype}
+            nr['cal_event_id'] = upsert_calendar_event(nr)
+            df = pd.concat([df, pd.DataFrame([nr])], ignore_index=True)
+            save_data(df); st.rerun()
