@@ -28,18 +28,31 @@ def get_calendar_service():
     return build('calendar', 'v3', credentials=scoped_creds)
 
 def upsert_calendar_event(row_data):
+    """Crée ou modifie l'événement. Gère le type 'Événement' ou 'Tâche' (All-day)."""
     if not row_data['echeance'] or row_data['type'] != "Task" or not CALENDAR_ID:
         return row_data.get('cal_event_id', "")
     try:
         service = get_calendar_service()
         start_dt = pd.to_datetime(row_data['echeance'])
+        
+        # LOGIQUE TYPE GOOGLE
+        if row_data.get('google_type') == "Tâche (Journée)":
+            # Format journée entière (sans heure)
+            start_body = {'date': start_dt.strftime('%Y-%m-%d')}
+            end_body = {'date': (start_dt + timedelta(days=1)).strftime('%Y-%m-%d')}
+        else:
+            # Format événement avec heure
+            start_body = {'dateTime': start_dt.isoformat(), 'timeZone': 'Europe/Paris'}
+            end_body = {'dateTime': (start_dt + timedelta(minutes=30)).isoformat(), 'timeZone': 'Europe/Paris'}
+
         event_body = {
             'summary': row_data['titre'],
             'location': row_data['gros_titre'],
             'description': row_data['contenu'],
-            'start': {'dateTime': start_dt.isoformat(), 'timeZone': 'Europe/Paris'},
-            'end': {'dateTime': (start_dt + timedelta(minutes=30)).isoformat(), 'timeZone': 'Europe/Paris'},
+            'start': start_body,
+            'end': end_body,
         }
+
         cal_id = str(row_data.get('cal_event_id', ""))
         if cal_id and cal_id not in ["", "nan", "None"]:
             try:
@@ -51,7 +64,9 @@ def upsert_calendar_event(row_data):
         else:
             event = service.events().insert(calendarId=CALENDAR_ID, body=event_body).execute()
             return event.get('id')
-    except: return row_data.get('cal_event_id', "")
+    except Exception as e:
+        st.error(f"Erreur Agenda : {e}")
+        return row_data.get('cal_event_id', "")
 
 # --- CONNEXION & DATA ---
 conn = st.connection("gsheets", type=GSheetsConnection)
@@ -59,7 +74,7 @@ conn = st.connection("gsheets", type=GSheetsConnection)
 def load_data():
     try:
         df_loaded = conn.read(ttl=0).dropna(subset=['gros_titre', 'titre'], how='all')
-        cols = ['id', 'status', 'date_archive', 'image_b64', 'notif_sent', 'gros_titre', 'titre', 'echeance', 'contenu', 'type', 'cal_event_id']
+        cols = ['id', 'status', 'date_archive', 'image_b64', 'notif_sent', 'gros_titre', 'titre', 'echeance', 'contenu', 'type', 'cal_event_id', 'google_type']
         for col in cols:
             if col not in df_loaded.columns: df_loaded[col] = ""
             df_loaded[col] = df_loaded[col].astype(str).replace('nan', '')
@@ -68,7 +83,7 @@ def load_data():
         df_loaded['date_archive_dt'] = pd.to_datetime(df_loaded['date_archive'], errors='coerce')
         return df_loaded
     except:
-        return pd.DataFrame(columns=['id', 'status', 'date_archive', 'image_b64', 'notif_sent', 'gros_titre', 'titre', 'echeance', 'contenu', 'type', 'cal_event_id'])
+        return pd.DataFrame(columns=['id', 'status', 'date_archive', 'image_b64', 'notif_sent', 'gros_titre', 'titre', 'echeance', 'contenu', 'type', 'cal_event_id', 'google_type'])
 
 def save_data(df_to_save):
     final_df = df_to_save.drop(columns=['dt_obj', 'date_archive_dt'], errors='ignore')
@@ -97,7 +112,7 @@ if 'edit_item_idx' not in st.session_state:
 
 # --- COMPOSANT FORMULAIRE ---
 def show_saisie_form(idx_e=None):
-    global df # Déclaration obligatoire au début de la fonction
+    global df
     edit_r = df.loc[idx_e] if idx_e is not None else None
     st.subheader("🖊️ Saisie rapide" if idx_e is None else "✏️ Modification en cours")
     
@@ -112,6 +127,10 @@ def show_saisie_form(idx_e=None):
             idx_t = l_t.index(edit_r['titre'])+1 if (edit_r is not None and edit_r['titre'] in l_t) else 0
             f_t = st.selectbox("Titre", [""] + l_t, index=idx_t)
             f_t_n = st.text_input("OU Nouveau Titre")
+            
+            # CHOIX TYPE GOOGLE
+            f_gtype = st.radio("Type d'affichage calendrier :", ["Événement (Heure)", "Tâche (Journée)"], 
+                               index=0 if (edit_r is None or edit_r['google_type'] != "Tâche (Journée)") else 1)
         with c2:
             f_c = st.text_area("Contenu", value=edit_r['contenu'] if edit_r is not None else "")
             f_d = st.date_input("Date", value=edit_r['dt_obj'].date() if (edit_r is not None and not pd.isna(edit_r['dt_obj'])) else None)
@@ -125,25 +144,28 @@ def show_saisie_form(idx_e=None):
             b64 = edit_r['image_b64'] if (edit_r is not None) else ""
             if f_img:
                 img = Image.open(f_img)
-                if img.mode in ("RGBA", "P"): 
-                    img = img.convert("RGB")
+                if img.mode in ("RGBA", "P"): img = img.convert("RGB")
                 img.thumbnail((400, 400))
                 buf = io.BytesIO()
                 img.save(buf, format="JPEG", quality=70)
                 b64 = base64.b64encode(buf.getvalue()).decode()
             
-            temp_r = {'titre': final_t, 'gros_titre': final_gt, 'contenu': f_c, 'echeance': date_s, 'type': "Task" if f_d else "Note", 'cal_event_id': edit_r['cal_event_id'] if edit_r is not None else ""}
+            temp_r = {'titre': final_t, 'gros_titre': final_gt, 'contenu': f_c, 'echeance': date_s, 
+                      'type': "Task" if f_d else "Note", 'cal_event_id': edit_r['cal_event_id'] if edit_r is not None else "",
+                      'google_type': f_gtype}
             new_cal_id = upsert_calendar_event(temp_r)
 
             if idx_e is not None:
                 df.at[idx_e, 'gros_titre'], df.at[idx_e, 'titre'], df.at[idx_e, 'contenu'] = final_gt, final_t, f_c
                 df.at[idx_e, 'echeance'], df.at[idx_e, 'type'], df.at[idx_e, 'image_b64'] = date_s, ("Task" if f_d else "Note"), b64
-                df.at[idx_e, 'cal_event_id'] = new_cal_id
+                df.at[idx_e, 'cal_event_id'], df.at[idx_e, 'google_type'] = new_cal_id, f_gtype
                 df.at[idx_e, 'notif_sent'] = ""
             else:
                 ids = pd.to_numeric(df['id'], errors='coerce').dropna()
                 nid = int(ids.max() + 1) if not ids.empty else 1
-                new_row = {"id": str(nid), "gros_titre": final_gt, "titre": final_t, "contenu": f_c, "echeance": date_s, "type": ("Task" if f_d else "Note"), "status": "En cours", "date_archive": "", "image_b64": b64, "notif_sent": "", "cal_event_id": new_cal_id}
+                new_row = {"id": str(nid), "gros_titre": final_gt, "titre": final_t, "contenu": f_c, "echeance": date_s, 
+                           "type": ("Task" if f_d else "Note"), "status": "En cours", "date_archive": "", 
+                           "image_b64": b64, "notif_sent": "", "cal_event_id": new_cal_id, "google_type": f_gtype}
                 df = pd.concat([df, pd.DataFrame([new_row])], ignore_index=True)
             
             save_data(df)
@@ -165,7 +187,8 @@ def item_card(idx, row, is_overdue=False, key_suffix=""):
                     df.at[idx, 'status'], df.at[idx, 'date_archive'], df.at[idx, 'notif_sent'] = 'En cours', "", ""
                     save_data(df); st.rerun()
         with c2:
-            st.markdown(f"**{row['gros_titre']}** > {row['titre']}")
+            badge = "📌 " if row['google_type'] == "Tâche (Journée)" else "⏰ "
+            st.markdown(f"**{row['gros_titre']}** > {badge}{row['titre']}")
             st.write(row['contenu'])
             img_data = row.get('image_b64', "")
             if isinstance(img_data, str) and len(img_data) > 50:
@@ -173,12 +196,12 @@ def item_card(idx, row, is_overdue=False, key_suffix=""):
                 except: pass
         with c3:
             if row['type'] == 'Task' and not pd.isna(row['dt_obj']):
-                st.markdown(f"<span style='color:{color}'>📅 {row['dt_obj'].strftime('%d/%m/%Y %H:%M')}</span>", unsafe_allow_html=True)
+                fmt = '%d/%m/%Y' if row['google_type'] == "Tâche (Journée)" else '%d/%m/%Y %H:%M'
+                st.markdown(f"<span style='color:{color}'>📅 {row['dt_obj'].strftime(fmt)}</span>", unsafe_allow_html=True)
             else: st.caption("📝 Note")
         with c4:
             if st.button("✏️", key=f"ed_{idx}_{key_suffix}"):
-                st.session_state['edit_item_idx'] = idx
-                st.rerun()
+                st.session_state['edit_item_idx'] = idx; st.rerun()
 
 # --- AFFICHAGE ---
 if st.session_state['edit_item_idx'] is not None:
@@ -189,7 +212,9 @@ if st.session_state['edit_item_idx'] is not None:
     st.divider()
 
 tabs = st.tabs(["☀️ Jour", "📅 Semaine", "📊 Mois", "📂 Thèmes", "📝 Notes", "🗄️ Archive", "🖊️ Saisie"])
-active = df[df['status'] == 'En cours']
+
+# TRI CHRONOLOGIQUE GLOBAL
+active = df[df['status'] == 'En cours'].sort_values('dt_obj', ascending=True)
 
 with tabs[0]: # JOUR
     ov = active[(active['type'] == 'Task') & (active['dt_obj'] < now_ts)]
@@ -205,21 +230,21 @@ with tabs[2]: # MOIS
     mo = active[(active['dt_obj'].dt.date > today + timedelta(days=7)) & (active['dt_obj'].dt.date <= today + timedelta(days=30))]
     for idx, r in mo.iterrows(): item_card(idx, r, key_suffix="mo")
 
-with tabs[3]: # THEMES
+with tabs[3]: # THEMES (Trié par dossier puis par date)
     for gt in sorted(active['gros_titre'].unique()):
         with st.expander(f"📁 {gt}"):
-            for idx, r in active[active['gros_titre'] == gt].iterrows(): item_card(idx, r, key_suffix="th")
+            sub = active[active['gros_titre'] == gt].sort_values('dt_obj', ascending=True)
+            for idx, r in sub.iterrows(): item_card(idx, r, key_suffix="th")
 
 with tabs[4]: # NOTES
     for idx, r in active[active['type'] == 'Note'].iterrows(): item_card(idx, r, key_suffix="nt")
 
 with tabs[5]: # ARCHIVE
-    arc = df[df['status'] == 'Terminé']
-    for idx, r in arc.sort_values('date_archive', ascending=False).iterrows(): item_card(idx, r, key_suffix="arc")
+    arc = df[df['status'] == 'Terminé'].sort_values('date_archive', ascending=False)
+    for idx, r in arc.iterrows(): item_card(idx, r, key_suffix="arc")
 
 with tabs[6]: # SAISIE
-    if st.session_state['edit_item_idx'] is None:
-        show_saisie_form()
+    if st.session_state['edit_item_idx'] is None: show_saisie_form()
     else: st.info("Modif en cours en haut de page.")
 
 with st.sidebar:
