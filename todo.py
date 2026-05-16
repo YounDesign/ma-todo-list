@@ -103,6 +103,62 @@ now_ts = pd.Timestamp(datetime.now())
 
 if 'edit_item_idx' not in st.session_state: st.session_state['edit_item_idx'] = None
 
+# --- COMPOSANT CARTE ---
+def item_card(idx, row, is_overdue=False, key_suffix=""):
+    color = "#FF4B4B" if is_overdue else "#31333F"
+    with st.container(border=True):
+        if is_overdue: st.markdown("🚨 **PIMPON ! RETARD** 🚨", unsafe_allow_html=True)
+        c1, c2, c3, c4 = st.columns([0.1, 0.4, 0.4, 0.1])
+        
+        with c1:
+            if row['status'] != 'Terminé':
+                if st.checkbox("Fait", key=f"c_{idx}_{key_suffix}", label_visibility="collapsed"):
+                    delete_calendar_event(row['cal_event_id'])
+                    df.at[idx, 'status'], df.at[idx, 'date_archive'] = 'Terminé', datetime.now().strftime('%Y-%m-%d')
+                    save_data(df); st.rerun()
+            else:
+                if st.button("🔄", key=f"r_{idx}_{key_suffix}"):
+                    new_cal = upsert_calendar_event(row.to_dict())
+                    df.at[idx, 'status'], df.at[idx, 'date_archive'], df.at[idx, 'cal_event_id'] = 'En cours', "", new_cal
+                    save_data(df); st.rerun()
+        
+        with c2:
+            st.markdown(f"<span style='color:{color}; font-weight:bold;'>{row['gros_titre']} > {row['titre']}</span>", unsafe_allow_html=True)
+            st.write(row['contenu'])
+            img_raw = row.get('image_b64', "")
+            if isinstance(img_raw, str) and len(img_raw) > 50:
+                try: st.image(base64.b64decode(img_raw), width=200)
+                except: pass
+        
+        with c3:
+            if row['type'] == 'Task' and not pd.isna(row['dt_obj']):
+                st.markdown(f"<span style='color:{color}'>📅 {row['dt_obj'].strftime('%d/%m/%Y %H:%M')}</span>", unsafe_allow_html=True)
+                
+                # --- BOUTON DE REPORT RAPIDE ---
+                if row['status'] != 'Terminé':
+                    if st.button("⏩ Report demain 08h", key=f"quick_{idx}_{key_suffix}"):
+                        # Calculer demain à 08:00
+                        tomorrow_8am = (datetime.now() + timedelta(days=1)).replace(hour=8, minute=0, second=0, microsecond=0)
+                        date_str = tomorrow_8am.strftime('%Y-%m-%d %H:%M:%S')
+                        
+                        # Mettre à jour les données locales
+                        df.at[idx, 'echeance'] = date_str
+                        df.at[idx, 'notif_sent'] = "" # Permettre une nouvelle notif
+                        
+                        # Synchroniser Google Calendar
+                        updated_row = df.loc[idx].to_dict()
+                        new_cal_id = upsert_calendar_event(updated_row)
+                        df.at[idx, 'cal_event_id'] = new_cal_id
+                        
+                        save_data(df)
+                        st.success(f"Reporté au {tomorrow_8am.strftime('%d/%m %H:%M')}")
+                        st.rerun()
+            else: st.caption("📝 Note")
+        
+        with c4:
+            if st.button("✏️", key=f"ed_{idx}_{key_suffix}"):
+                st.session_state['edit_item_idx'] = idx; st.rerun()
+
 # --- FORMULAIRE ---
 def show_saisie_form(idx_e=None):
     global df
@@ -146,44 +202,12 @@ def show_saisie_form(idx_e=None):
                 df.at[idx_e, 'echeance'], df.at[idx_e, 'type'], df.at[idx_e, 'image_b64'] = date_s, ("Task" if f_d else "Note"), b64
                 df.at[idx_e, 'cal_event_id'], df.at[idx_e, 'google_type'] = new_cal, f_gtype
             else:
-                nid = int(pd.to_numeric(df['id'], errors='coerce').max() + 1) if not df.empty else 1
+                ids = pd.to_numeric(df['id'], errors='coerce').dropna()
+                nid = int(ids.max() + 1) if not ids.empty else 1
                 new_row = {"id": str(nid), "gros_titre": f_gt_f, "titre": f_t_f, "contenu": f_c, "echeance": date_s, 
                            "type": ("Task" if f_d else "Note"), "status": "En cours", "image_b64": b64, "cal_event_id": new_cal, "google_type": f_gtype}
                 df = pd.concat([df, pd.DataFrame([new_row])], ignore_index=True)
             save_data(df); st.session_state['edit_item_idx'] = None; st.rerun()
-
-# --- COMPOSANT CARTE ---
-def item_card(idx, row, is_overdue=False, key_suffix=""):
-    color = "#FF4B4B" if is_overdue else "#31333F"
-    with st.container(border=True):
-        if is_overdue: st.markdown("🚨 **PIMPON ! RETARD** 🚨", unsafe_allow_html=True)
-        c1, c2, c3, c4 = st.columns([0.1, 0.5, 0.3, 0.1])
-        with c1:
-            if row['status'] != 'Terminé':
-                if st.checkbox("Fait", key=f"c_{idx}_{key_suffix}", label_visibility="collapsed"):
-                    delete_calendar_event(row['cal_event_id'])
-                    df.at[idx, 'status'], df.at[idx, 'date_archive'] = 'Terminé', datetime.now().strftime('%Y-%m-%d')
-                    save_data(df); st.rerun()
-            else:
-                if st.button("🔄", key=f"r_{idx}_{key_suffix}"):
-                    new_cal = upsert_calendar_event(row.to_dict())
-                    df.at[idx, 'status'], df.at[idx, 'date_archive'], df.at[idx, 'cal_event_id'] = 'En cours', "", new_cal
-                    save_data(df); st.rerun()
-        with c2:
-            st.markdown(f"<span style='color:{color}; font-weight:bold;'>{row['gros_titre']} > {row['titre']}</span>", unsafe_allow_html=True)
-            st.write(row['contenu'])
-            # --- FIX IMAGE ULTRA-SÉCURISÉ ---
-            img_raw = row.get('image_b64', "")
-            if isinstance(img_raw, str) and len(img_raw) > 50:
-                try: st.image(base64.b64decode(img_raw), width=250)
-                except: pass
-        with c3:
-            if row['type'] == 'Task' and not pd.isna(row['dt_obj']):
-                st.markdown(f"<span style='color:{color}'>📅 {row['dt_obj'].strftime('%d/%m/%Y %H:%M')}</span>", unsafe_allow_html=True)
-            else: st.caption("📝 Note")
-        with c4:
-            if st.button("✏️", key=f"ed_{idx}_{key_suffix}"):
-                st.session_state['edit_item_idx'] = idx; st.rerun()
 
 # --- AFFICHAGE ---
 if st.session_state['edit_item_idx'] is not None:
