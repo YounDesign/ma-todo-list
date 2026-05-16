@@ -28,21 +28,18 @@ def get_calendar_service():
     return build('calendar', 'v3', credentials=scoped_creds)
 
 def delete_calendar_event(cal_id):
-    """Supprime l'événement Google."""
-    if not cal_id or not CALENDAR_ID or cal_id in ["", "nan"]: return
+    if not cal_id or not CALENDAR_ID or str(cal_id).lower() in ["", "nan", "none"]: return
     try:
         service = get_calendar_service()
-        service.events().delete(calendarId=CALENDAR_ID, eventId=cal_id).execute()
-        st.toast("🗑️ Supprimé de Google Calendar")
+        service.events().delete(calendarId=CALENDAR_ID, eventId=str(cal_id)).execute()
+        st.toast("🗑️ Supprimé de Google")
     except: pass
 
 def upsert_calendar_event(row_data):
-    """Crée ou Modifie l'événement Google."""
     if not row_data['echeance'] or row_data['type'] != "Task" or not CALENDAR_ID: return ""
     try:
         service = get_calendar_service()
         start_dt = pd.to_datetime(row_data['echeance'])
-        
         if row_data.get('google_type') == "Tâche (Journée)":
             start_body = {'date': start_dt.strftime('%Y-%m-%d')}
             end_body = {'date': (start_dt + timedelta(days=1)).strftime('%Y-%m-%d')}
@@ -54,7 +51,7 @@ def upsert_calendar_event(row_data):
                       'description': row_data['contenu'], 'start': start_body, 'end': end_body}
 
         cal_id = str(row_data.get('cal_event_id', ""))
-        if cal_id and cal_id not in ["", "nan", "None"]:
+        if cal_id and cal_id.lower() not in ["", "nan", "none"]:
             try:
                 event = service.events().update(calendarId=CALENDAR_ID, eventId=cal_id, body=event_body).execute()
                 return event.get('id')
@@ -75,7 +72,7 @@ def load_data():
         cols = ['id', 'status', 'date_archive', 'image_b64', 'notif_sent', 'gros_titre', 'titre', 'echeance', 'contenu', 'type', 'cal_event_id', 'google_type']
         for col in cols:
             if col not in df_loaded.columns: df_loaded[col] = ""
-            df_loaded[col] = df_loaded[col].astype(str).replace('nan', '')
+            df_loaded[col] = df_loaded[col].astype(str).replace('nan', '').fillna('')
         df_loaded.loc[df_loaded['status'] == "", 'status'] = 'En cours'
         df_loaded['dt_obj'] = pd.to_datetime(df_loaded['echeance'], errors='coerce')
         return df_loaded
@@ -106,25 +103,23 @@ now_ts = pd.Timestamp(datetime.now())
 
 if 'edit_item_idx' not in st.session_state: st.session_state['edit_item_idx'] = None
 
-# --- COMPOSANT FORMULAIRE ---
+# --- FORMULAIRE ---
 def show_saisie_form(idx_e=None):
     global df
     edit_r = df.loc[idx_e] if idx_e is not None else None
     st.subheader("🖊️ Saisie" if idx_e is None else "✏️ Modification")
-    
     with st.form(f"form_{idx_e if idx_e else 'new'}"):
         c1, c2 = st.columns(2)
         with c1:
             l_gt = sorted(list(set([str(x) for x in df['gros_titre'] if x])))
             idx_gt = l_gt.index(edit_r['gros_titre'])+1 if (edit_r is not None and edit_r['gros_titre'] in l_gt) else 0
             f_gt = st.selectbox("Dossier", [""] + l_gt, index=idx_gt)
-            f_gt_n = st.text_input("Nouveau Dossier")
+            f_gt_n = st.text_input("OU Nouveau Dossier")
             l_t = sorted(list(set([str(x) for x in df['titre'] if x])))
             idx_t = l_t.index(edit_r['titre'])+1 if (edit_r is not None and edit_r['titre'] in l_t) else 0
             f_t = st.selectbox("Titre", [""] + l_t, index=idx_t)
-            f_t_n = st.text_input("Nouveau Titre")
-            f_gtype = st.radio("Type calendrier :", ["Événement (Heure)", "Tâche (Journée)"], 
-                               index=0 if (edit_r is None or edit_r['google_type'] != "Tâche (Journée)") else 1)
+            f_t_n = st.text_input("OU Nouveau Titre")
+            f_gtype = st.radio("Type calendrier :", ["Événement (Heure)", "Tâche (Journée)"], index=0 if (edit_r is None or edit_r['google_type'] != "Tâche (Journée)") else 1)
         with c2:
             f_c = st.text_area("Contenu", value=edit_r['contenu'] if edit_r is not None else "")
             f_d = st.date_input("Date", value=edit_r['dt_obj'].date() if (edit_r is not None and not pd.isna(edit_r['dt_obj'])) else None)
@@ -132,10 +127,9 @@ def show_saisie_form(idx_e=None):
             f_img = st.file_uploader("Photo")
 
         if st.form_submit_button("💾 ENREGISTRER"):
-            f_gt_final = f_gt_n if f_gt_n else f_gt
-            f_t_final = f_t_n if f_t_n else f_t
+            f_gt_f, f_t_f = (f_gt_n if f_gt_n else f_gt), (f_t_n if f_t_n else f_t)
             date_s = datetime.combine(f_d, f_h).strftime('%Y-%m-%d %H:%M:%S') if f_d else ""
-            b64 = edit_r['image_b64'] if (edit_r is not None) else ""
+            b64 = str(edit_r['image_b64']) if (edit_r is not None) else ""
             if f_img:
                 img = Image.open(f_img)
                 if img.mode in ("RGBA", "P"): img = img.convert("RGB")
@@ -143,18 +137,18 @@ def show_saisie_form(idx_e=None):
                 buf = io.BytesIO(); img.save(buf, format="JPEG", quality=70)
                 b64 = base64.b64encode(buf.getvalue()).decode()
             
-            temp_r = {'titre': f_t_final, 'gros_titre': f_gt_final, 'contenu': f_c, 'echeance': date_s, 
+            temp_r = {'titre': f_t_f, 'gros_titre': f_gt_f, 'contenu': f_c, 'echeance': date_s, 
                       'type': "Task" if f_d else "Note", 'cal_event_id': edit_r['cal_event_id'] if edit_r is not None else "", 'google_type': f_gtype}
-            new_cal_id = upsert_calendar_event(temp_r)
+            new_cal = upsert_calendar_event(temp_r)
 
             if idx_e is not None:
-                df.at[idx_e, 'gros_titre'], df.at[idx_e, 'titre'], df.at[idx_e, 'contenu'] = f_gt_final, f_t_final, f_c
+                df.at[idx_e, 'gros_titre'], df.at[idx_e, 'titre'], df.at[idx_e, 'contenu'] = f_gt_f, f_t_f, f_c
                 df.at[idx_e, 'echeance'], df.at[idx_e, 'type'], df.at[idx_e, 'image_b64'] = date_s, ("Task" if f_d else "Note"), b64
-                df.at[idx_e, 'cal_event_id'], df.at[idx_e, 'google_type'] = new_cal_id, f_gtype
+                df.at[idx_e, 'cal_event_id'], df.at[idx_e, 'google_type'] = new_cal, f_gtype
             else:
                 nid = int(pd.to_numeric(df['id'], errors='coerce').max() + 1) if not df.empty else 1
-                new_row = {"id": str(nid), "gros_titre": f_gt_final, "titre": f_t_final, "contenu": f_c, "echeance": date_s, 
-                           "type": ("Task" if f_d else "Note"), "status": "En cours", "image_b64": b64, "cal_event_id": new_cal_id, "google_type": f_gtype}
+                new_row = {"id": str(nid), "gros_titre": f_gt_f, "titre": f_t_f, "contenu": f_c, "echeance": date_s, 
+                           "type": ("Task" if f_d else "Note"), "status": "En cours", "image_b64": b64, "cal_event_id": new_cal, "google_type": f_gtype}
                 df = pd.concat([df, pd.DataFrame([new_row])], ignore_index=True)
             save_data(df); st.session_state['edit_item_idx'] = None; st.rerun()
 
@@ -162,26 +156,26 @@ def show_saisie_form(idx_e=None):
 def item_card(idx, row, is_overdue=False, key_suffix=""):
     color = "#FF4B4B" if is_overdue else "#31333F"
     with st.container(border=True):
-        if is_overdue: st.markdown("🚨 **PIMPON ! RETARD DÉPASSÉ** 🚨", unsafe_allow_html=True)
+        if is_overdue: st.markdown("🚨 **PIMPON ! RETARD** 🚨", unsafe_allow_html=True)
         c1, c2, c3, c4 = st.columns([0.1, 0.5, 0.3, 0.1])
         with c1:
             if row['status'] != 'Terminé':
                 if st.checkbox("Fait", key=f"c_{idx}_{key_suffix}", label_visibility="collapsed"):
-                    # ACTION : Supprimer de Google et archiver
                     delete_calendar_event(row['cal_event_id'])
                     df.at[idx, 'status'], df.at[idx, 'date_archive'] = 'Terminé', datetime.now().strftime('%Y-%m-%d')
                     save_data(df); st.rerun()
             else:
-                if st.button("🔄", key=f"r_{idx}_{key_suffix}", help="Restaurer"):
-                    # ACTION : Recréer sur Google et restaurer
+                if st.button("🔄", key=f"r_{idx}_{key_suffix}"):
                     new_cal = upsert_calendar_event(row.to_dict())
                     df.at[idx, 'status'], df.at[idx, 'date_archive'], df.at[idx, 'cal_event_id'] = 'En cours', "", new_cal
                     save_data(df); st.rerun()
         with c2:
             st.markdown(f"<span style='color:{color}; font-weight:bold;'>{row['gros_titre']} > {row['titre']}</span>", unsafe_allow_html=True)
             st.write(row['contenu'])
-            if row['image_b64'] and len(row['image_b64']) > 50:
-                try: st.image(base64.b64decode(row['image_b64']), width=250)
+            # --- FIX IMAGE ULTRA-SÉCURISÉ ---
+            img_raw = row.get('image_b64', "")
+            if isinstance(img_raw, str) and len(img_raw) > 50:
+                try: st.image(base64.b64decode(img_raw), width=250)
                 except: pass
         with c3:
             if row['type'] == 'Task' and not pd.isna(row['dt_obj']):
