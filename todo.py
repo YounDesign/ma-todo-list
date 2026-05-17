@@ -74,7 +74,7 @@ def get_category_style(gt):
     color_idx = sum(ord(c) for c in str(gt)) % len(colors)
     return colors[color_idx], emoji
 
-# --- CONNEXION ---
+# --- CONNEXION & DATA ---
 conn = st.connection("gsheets", type=GSheetsConnection)
 
 def load_data():
@@ -115,6 +115,9 @@ now_fr = get_now_fr()
 today_date = now_fr.date()
 
 if 'edit_item_idx' not in st.session_state: st.session_state['edit_item_idx'] = None
+if 'search_reset' not in st.session_state: st.session_state['search_reset'] = 0
+# Initialisation de la mémoire du champ contenu
+if 'temp_contenu' not in st.session_state: st.session_state['temp_contenu'] = ""
 
 # --- LOGIQUE REPORT RAPIDE ---
 def quick_reschedule(idx, days=0, weeks=0):
@@ -133,15 +136,14 @@ def item_card(idx, row, is_overdue=False, key_suffix=""):
     relances = 0
     try: relances = int(float(row['compteur_relance'] or 0))
     except: pass
-    
     procrastination_alert = relances >= 5
     card_bg = "#fff1f1" if is_overdue else "white"
     border_style = f"border-left: 10px solid {cat_color};"
     if is_overdue: border_style = "border: 4px solid #FF4B4B;"
     if procrastination_alert: border_style = "border: 5px solid #FF8C00;"; card_bg = "#FFF5E6"
 
-    # HTML propre et fermé
-    card_html = f"""
+    # Affichage HTML corrigé (fermeture stricte des div)
+    st.markdown(f"""
     <div style='{border_style} padding:15px; border-radius:10px; margin-bottom:10px; background-color:{card_bg}; box-shadow: 2px 2px 5px rgba(0,0,0,0.1);'>
         <div style='display:flex; justify-content:space-between;'><span style='color:{cat_color}; font-weight:bold;'>{cat_emoji} {row['gros_titre']}</span>
         {"<span style='color:#FF8C00; font-weight:bold;'>⚠️ " + str(relances) + " REPORTS</span>" if relances > 0 else ""}</div>
@@ -149,8 +151,7 @@ def item_card(idx, row, is_overdue=False, key_suffix=""):
         <div style='color:#333; margin-top:5px; white-space: pre-wrap;'>{row['contenu']}</div>
         {"<div style='color:#FF8C00; font-weight:bold; margin-top:10px;'>🚨 STOP PROCRASTINATION ! 🚨</div>" if procrastination_alert else ""}
     </div>
-    """
-    st.markdown(card_html, unsafe_allow_html=True)
+    """, unsafe_allow_html=True)
     
     c1, c2, c3 = st.columns([0.2, 0.6, 0.2])
     with c1:
@@ -182,21 +183,16 @@ def item_card(idx, row, is_overdue=False, key_suffix=""):
             st.session_state['edit_item_idx'] = idx; st.rerun()
     st.divider()
 
-# --- SIDEBAR & RECHERCHE (Fix SessionState) ---
+# --- SIDEBAR ---
 with st.sidebar:
     st.markdown("### 🔍 Recherche")
-    # Pour vider le champ, on utilise une astuce de clé dynamique
-    if "search_reset" not in st.session_state: st.session_state.search_reset = 0
-    
     search_query = st.text_input("Filtrer...", key=f"s_{st.session_state.search_reset}")
-    if st.button("❌ Effacer la recherche"):
+    if st.button("❌ Effacer"):
         st.session_state.search_reset += 1
         st.rerun()
-    
     st.divider()
     if st.button("🚪 Déconnexion"): del st.session_state["password_correct"]; st.rerun()
 
-# --- FILTRAGE ---
 df_f = df.copy()
 search = search_query.lower()
 if search:
@@ -207,7 +203,11 @@ def show_form(idx_e=None):
     global df
     edit_r = df.loc[idx_e] if idx_e is not None else None
     st.subheader("🖊️ Saisie" if idx_e is None else "✏️ Modification")
-    with st.form(f"form_{idx_e if idx_e is not None else 'new'}"):
+    
+    # On pré-remplit le contenu avec la session_state si c'est une nouvelle saisie
+    default_contenu = edit_r['contenu'] if idx_e is not None else st.session_state.temp_contenu
+
+    with st.form(f"form_{idx_e if idx_e else 'new'}"):
         c1, c2 = st.columns(2)
         with c1:
             l_gt = sorted(list(set([str(x) for x in df['gros_titre'] if x])))
@@ -220,17 +220,17 @@ def show_form(idx_e=None):
             f_t_n = st.text_input("OU Nouveau Titre")
             f_gtype = st.radio("Type :", ["Événement (Heure)", "Tâche (Journée)"], index=0 if (edit_r is None or edit_r['google_type'] != "Tâche (Journée)") else 1)
         with c2:
-            f_c = st.text_area("Contenu", value=edit_r['contenu'] if edit_r is not None else "")
+            # Champ avec clé pour reset manuel
+            f_c = st.text_area("Contenu / Description", value=default_contenu)
             f_d = st.date_input("Date", value=edit_r['dt_obj'].date() if (edit_r is not None and not pd.isna(edit_r['dt_obj'])) else None)
             f_h = st.time_input("Heure", value=edit_r['dt_obj'].time() if (edit_r is not None and not pd.isna(edit_r['dt_obj'])) else time(8,0))
             f_img = st.file_uploader("Photo")
         
         if st.form_submit_button("💾 ENREGISTRER"):
-            # Validation Stricte
             if (f_gt != "" and f_gt_n != "") or (f_t != "" and f_t_n != ""):
-                st.error("⚠️ Erreur : Ne remplissez pas 'Existant' ET 'Nouveau' en même temps.")
+                st.error("⚠️ Ne remplissez pas 'Existant' ET 'Nouveau'.")
             elif (f_gt == "" and f_gt_n == "") or (f_t == "" and f_t_n == ""):
-                st.error("⚠️ Erreur : Dossier et Titre obligatoires.")
+                st.error("⚠️ Dossier et Titre obligatoires.")
             else:
                 f_gt_f, f_t_f = (f_gt_n if f_gt_n else f_gt), (f_t_n if f_t_n else f_t)
                 date_s = datetime.combine(f_d, f_h).strftime('%Y-%m-%d %H:%M:%S') if f_d else ""
@@ -250,7 +250,12 @@ def show_form(idx_e=None):
                     nr = {"id": str(nid), "gros_titre": f_gt_f, "titre": f_t_f, "contenu": f_c, "echeance": date_s, "type": ("Task" if f_d else "Note"), "status": "En cours", "image_b64": b64, "google_type": f_gtype, "compteur_relance": "0"}
                     nr['cal_event_id'] = upsert_calendar_event(nr)
                     df = pd.concat([df, pd.DataFrame([nr])], ignore_index=True)
-                save_data(df); st.session_state['edit_item_idx'] = None; st.rerun()
+                
+                save_data(df)
+                st.session_state['edit_item_idx'] = None
+                # VIDE UNIQUEMENT LE CONTENU POUR LA PROCHAINE SAISIE
+                st.session_state['temp_contenu'] = ""
+                st.rerun()
 
 # --- AFFICHAGE ---
 if st.session_state['edit_item_idx'] is not None:
@@ -267,7 +272,6 @@ with tabs[0]: # JOUR
     for idx, r in ov.iterrows(): item_card(idx, r, is_overdue=True, key_suffix="ov")
     tod = active[(active['type'] == 'Task') & (active['dt_obj'].dt.date == today_date)]
     for idx, r in tod.iterrows(): item_card(idx, r, key_suffix="tod")
-    if ov.empty and tod.empty: st.info("Rien aujourd'hui.")
 
 with tabs[1]: # SEMAINE
     wk = active[(active['type'] == 'Task') & (active['dt_obj'].dt.date > today_date) & (active['dt_obj'].dt.date <= today_date + timedelta(days=7))]
