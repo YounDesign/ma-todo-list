@@ -9,7 +9,7 @@ from PIL import Image
 from googleapiclient.discovery import build
 from google.oauth2 import service_account
 
-# --- CONFIGURATION ---
+# --- CONFIGURATION (Secrets) ---
 NTFY_TOPIC = st.secrets.get("ntfy_topic", "youndesign_pkm_789")
 CALENDAR_ID = st.secrets.get("calendar_id", "")
 
@@ -115,7 +115,6 @@ now_fr = get_now_fr()
 today_date = now_fr.date()
 
 if 'edit_item_idx' not in st.session_state: st.session_state['edit_item_idx'] = None
-if 'search_query' not in st.session_state: st.session_state['search_query'] = ""
 
 # --- LOGIQUE REPORT RAPIDE ---
 def quick_reschedule(idx, days=0, weeks=0):
@@ -141,16 +140,17 @@ def item_card(idx, row, is_overdue=False, key_suffix=""):
     if is_overdue: border_style = "border: 4px solid #FF4B4B;"
     if procrastination_alert: border_style = "border: 5px solid #FF8C00;"; card_bg = "#FFF5E6"
 
-    # RENDU HTML OBLIGATOIRE
-    st.markdown(f"""
+    # HTML propre et fermé
+    card_html = f"""
     <div style='{border_style} padding:15px; border-radius:10px; margin-bottom:10px; background-color:{card_bg}; box-shadow: 2px 2px 5px rgba(0,0,0,0.1);'>
         <div style='display:flex; justify-content:space-between;'><span style='color:{cat_color}; font-weight:bold;'>{cat_emoji} {row['gros_titre']}</span>
-        {f"<span style='color:#FF8C00; font-weight:bold;'>⚠️ {relances} REPORTS</span>" if relances > 0 else ""}</div>
+        {"<span style='color:#FF8C00; font-weight:bold;'>⚠️ " + str(relances) + " REPORTS</span>" if relances > 0 else ""}</div>
         <div style='font-size:1.2em; font-weight:bold; margin-top:5px;'>{'📌' if row['google_type'] == 'Tâche (Journée)' else '⏰'} {row['titre']}</div>
         <div style='color:#333; margin-top:5px; white-space: pre-wrap;'>{row['contenu']}</div>
-        {f"<div style='color:#FF8C00; font-weight:bold; margin-top:10px;'>🚨 STOP PROCRASTINATION ! 🚨</div>" if procrastination_alert else ""}
+        {"<div style='color:#FF8C00; font-weight:bold; margin-top:10px;'>🚨 STOP PROCRASTINATION ! 🚨</div>" if procrastination_alert else ""}
     </div>
-    """, unsafe_allow_html=True)
+    """
+    st.markdown(card_html, unsafe_allow_html=True)
     
     c1, c2, c3 = st.columns([0.2, 0.6, 0.2])
     with c1:
@@ -182,19 +182,23 @@ def item_card(idx, row, is_overdue=False, key_suffix=""):
             st.session_state['edit_item_idx'] = idx; st.rerun()
     st.divider()
 
-# --- SIDEBAR & RECHERCHE ---
+# --- SIDEBAR & RECHERCHE (Fix SessionState) ---
 with st.sidebar:
     st.markdown("### 🔍 Recherche")
-    # Utilisation d'un champ avec Session State pour le Reset
-    st.text_input("Filtrer les tâches...", key="search_query")
+    # Pour vider le champ, on utilise une astuce de clé dynamique
+    if "search_reset" not in st.session_state: st.session_state.search_reset = 0
+    
+    search_query = st.text_input("Filtrer...", key=f"s_{st.session_state.search_reset}")
     if st.button("❌ Effacer la recherche"):
-        st.session_state.search_query = ""
+        st.session_state.search_reset += 1
         st.rerun()
+    
     st.divider()
     if st.button("🚪 Déconnexion"): del st.session_state["password_correct"]; st.rerun()
 
+# --- FILTRAGE ---
 df_f = df.copy()
-search = st.session_state.search_query.lower()
+search = search_query.lower()
 if search:
     df_f = df[df['titre'].str.lower().str.contains(search) | df['contenu'].str.lower().str.contains(search) | df['gros_titre'].str.lower().str.contains(search)]
 
@@ -203,7 +207,7 @@ def show_form(idx_e=None):
     global df
     edit_r = df.loc[idx_e] if idx_e is not None else None
     st.subheader("🖊️ Saisie" if idx_e is None else "✏️ Modification")
-    with st.form(f"form_{idx_e if idx_e else 'new'}"):
+    with st.form(f"form_{idx_e if idx_e is not None else 'new'}"):
         c1, c2 = st.columns(2)
         with c1:
             l_gt = sorted(list(set([str(x) for x in df['gros_titre'] if x])))
@@ -222,7 +226,7 @@ def show_form(idx_e=None):
             f_img = st.file_uploader("Photo")
         
         if st.form_submit_button("💾 ENREGISTRER"):
-            # Validation Anti-doublons
+            # Validation Stricte
             if (f_gt != "" and f_gt_n != "") or (f_t != "" and f_t_n != ""):
                 st.error("⚠️ Erreur : Ne remplissez pas 'Existant' ET 'Nouveau' en même temps.")
             elif (f_gt == "" and f_gt_n == "") or (f_t == "" and f_t_n == ""):
@@ -248,13 +252,12 @@ def show_form(idx_e=None):
                     df = pd.concat([df, pd.DataFrame([nr])], ignore_index=True)
                 save_data(df); st.session_state['edit_item_idx'] = None; st.rerun()
 
-# --- AFFICHAGE MODIF ---
+# --- AFFICHAGE ---
 if st.session_state['edit_item_idx'] is not None:
     show_form(st.session_state['edit_item_idx'])
     if st.button("❌ Annuler"): st.session_state['edit_item_idx'] = None; st.rerun()
     st.divider()
 
-# --- ONGLETS ---
 tabs = st.tabs(["☀️ Jour", "📅 Semaine", "📊 Mois", "📂 Thèmes", "📝 Notes", "🗄️ Archive", "🖊️ Saisie"])
 active = df_f[df_f['status'] == 'En cours'].copy()
 if not active.empty: active = active.sort_values('dt_obj', ascending=True)
